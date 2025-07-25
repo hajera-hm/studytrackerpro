@@ -1,0 +1,25 @@
+# .github/workflows/deploy.yml
+name: Deploy to Firebase Hosting
+
+on:
+  push:
+    branches:
+      - main # Ensure this matches your branch name
+
+jobs:
+  deploy: # Renamed job since there's no "build" step
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # No Node.js setup, no npm install, no build step needed for a single HTML file
+
+      - name: Deploy to Firebase
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: '${{ secrets.GITHUB_TOKEN }}'
+          firebaseServiceAccount: '${{ secrets.FIREBASE_SERVICE_ACCOUNT }}'
+          projectId: study-tracker-pro-93bd5 # <<< REPLACE THIS WITH YOUR ACTUAL FIREBASE PROJECT ID!
+          channelId: live

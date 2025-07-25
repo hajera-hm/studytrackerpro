@@ -1,0 +1,3823 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Study Tracker Pro</title>
+    <!-- Chart.js CDN for creating graphs -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Google Fonts for 'Exo 2' -->
+    <link href="https://fonts.googleapis.com/css2?family=Exo+2:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, collection, query, orderBy, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Global Firebase Variables ---
+        let app;
+        let db;
+        let auth;
+        let userId = null; // Firebase User ID
+        // Your web app's Firebase configuration
+        // For Firebase JS SDK v7.20.0 and later, measurementId is optional
+        const firebaseConfig = {
+            apiKey: "AIzaSyBg0XMS_t817-a0jUaAaN4G2R0IBQJcCRE",
+            authDomain: "study-tracker-pro-93bd5.firebaseapp.com",
+            projectId: "study-tracker-pro-93bd5",
+            storageBucket: "study-tracker-pro-93bd5.firebase-storage.app",
+            messagingSenderId: "580400970879",
+            appId: "1:580400970879:web:987e076ec62cc2db85d34a",
+            measurementId: "G-8MV4K9C5QS"
+        };
+        let appId = firebaseConfig.projectId; // Set appId to the projectId from your provided config
+
+        // --- Global Application Data Variables ---
+        let loggedInUsername = null; // Stores the username of the currently logged-in user
+        let studyScores = [];
+        let achievements = [];
+        let deadlines = [];
+        let todos = [];
+        let manualLogs = []; // This will now store both manual logs and Pomodoro sessions
+        let events = [];
+        let notes = []; // Array to store notes
+        let editingNoteId = null; // Stores the ID of the note being edited
+
+        let studyChart = null; // Chart.js instance for progress scores
+        let studyTimeChart = null; // Chart.js instance for study time
+
+        let timeLeft = 0; // This now represents total seconds for the Pomodoro timer
+        let timerRunning = false;
+        let timerInterval;
+
+        let currentDate = new Date(); // For calendar navigation
+        let selectedCalendarDate = new Date(); // For displaying events for a specific date
+
+        // Flag to ensure initial deadline notification is sent only once after data load
+        let hasDeadlinesLoadedInitial = false;
+
+        // --- Utility Functions ---
+
+        /**
+         * Shows a specific page and hides others.
+         * @param {string} pageId The ID of the page to show.
+         */
+        function showPage(pageId) {
+            document.querySelectorAll('.page').forEach(page => {
+                page.classList.remove('active');
+            });
+            document.getElementById(pageId).classList.add('active');
+
+            // Specific actions when navigating to certain pages
+            if (pageId === 'dashboardPage') {
+                document.getElementById('dashboardWelcome').textContent = `WELCOME, ${loggedInUsername || 'USER'}!`;
+                document.querySelector('.app-name-display').textContent = '📚 STUDY TRACKER PRO';
+                document.getElementById('currentUserIdDisplay').textContent = `USER ID: ${userId || 'N/A'}`;
+            } else if (pageId === 'profilePage') {
+                renderProfileDetails();
+            } else if (pageId === 'progressPage') {
+                updateStudyChart(); // Ensure chart is updated when page is shown
+            } else if (pageId === 'eventsPage') {
+                renderCalendar(currentDate);
+                renderEventsForSelectedDate(selectedCalendarDate);
+            } else if (pageId === 'notesPage') { // Render notes when navigating to notes page
+                renderNotes();
+            } else if (pageId === 'timeTrackerPage') { // Update study time chart when navigating
+                updateStudyTimeChart();
+            }
+        }
+        window.showPage = showPage; // Make globally accessible
+
+        /**
+         * Displays the loading overlay.
+         */
+        function showLoading() {
+            document.getElementById('loadingOverlay').style.display = 'flex';
+        }
+        window.showLoading = showLoading; // Make globally accessible
+
+        /**
+         * Hides the loading overlay.
+         */
+        function hideLoading() {
+            document.getElementById('loadingOverlay').style.display = 'none';
+        }
+        window.hideLoading = hideLoading; // Make globally accessible
+
+        /**
+         * Displays a custom modal message.
+         * @param {string} message The message to display.
+         * @param {string} type The type of message (e.g., 'success', 'error').
+         */
+        function showModal(message, type = 'info') {
+            const modal = document.getElementById('customModal');
+            const messageText = document.getElementById('modalMessageText');
+            messageText.textContent = message;
+            modal.style.display = 'block';
+        }
+        window.showModal = showModal; // Make globally accessible
+
+        /**
+         * Hides the custom modal message.
+         */
+        function hideModal() {
+            document.getElementById('customModal').style.display = 'none';
+        }
+        window.hideModal = hideModal; // Make globally accessible
+
+        /**
+         * Sets up real-time listeners for all user data in Firestore.
+         */
+        function setupFirestoreListeners() {
+            if (!db || !userId) {
+                console.log("Firestore or User ID not ready for listeners.");
+                return;
+            }
+            console.log(`Setting up listeners for userId: ${userId} and appId: ${appId}`);
+
+            // Study Scores Listener
+            const studyScoresCollectionPath = `artifacts/${appId}/users/${userId}/studyScores`;
+            onSnapshot(collection(db, studyScoresCollectionPath), (snapshot) => {
+                console.log(`Listening to: ${studyScoresCollectionPath}`);
+                studyScores = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                studyScores.sort((a, b) => new Date(a.date) - new Date(b.date));
+                renderStudyScores();
+                updateStudyChart(); // Call update chart whenever study scores data changes
+            }, (error) => {
+                console.error("Error listening to study scores:", error);
+                showModal("ERROR LOADING STUDY SCORES. PLEASE TRY AGAIN.");
+            });
+
+            // Achievements Listener
+            const achievementsCollectionPath = `artifacts/${appId}/users/${userId}/achievements`;
+            onSnapshot(collection(db, achievementsCollectionPath), (snapshot) => {
+                console.log(`Listening to: ${achievementsCollectionPath}`);
+                achievements = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                achievements.sort((a, b) => new Date(b.date) - new Date(a.date));
+                renderAchievements();
+            }, (error) => {
+                console.error("Error listening to achievements:", error);
+                showModal("ERROR LOADING ACHIEVEMENTS. PLEASE TRY AGAIN.");
+            });
+
+            // Deadlines Listener
+            const deadlinesCollectionPath = `artifacts/${appId}/users/${userId}/deadlines`;
+            onSnapshot(collection(db, deadlinesCollectionPath), (snapshot) => {
+                console.log(`Listening to: ${deadlinesCollectionPath}`);
+                deadlines = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                deadlines.sort((a, b) => new Date(a.date) - new Date(b.date));
+                renderDeadlines();
+                // Trigger notification after deadlines are loaded/updated
+                // This ensures the first notification fires once the data is ready
+                if (!hasDeadlinesLoadedInitial) {
+                    console.log("Deadlines loaded for the first time. Attempting initial notification.");
+                    notifyNearestDeadline();
+                    scheduleDeadlineNotifications(); // Start interval only after initial load
+                    hasDeadlinesLoadedInitial = true;
+                }
+            }, (error) => {
+                console.error("Error listening to deadlines:", error);
+                showModal("ERROR LOADING DEADLINES. PLEASE TRY AGAIN.");
+            });
+
+            // Todos Listener
+            const todosCollectionPath = `artifacts/${appId}/users/${userId}/todos`;
+            onSnapshot(collection(db, todosCollectionPath), (snapshot) => {
+                console.log(`Listening to: ${todosCollectionPath}`);
+                todos = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                renderTodos();
+            }, (error) => {
+                console.error("Error listening to todos:", error);
+                showModal("ERROR LOADING TASKS. PLEASE TRY AGAIN.");
+            });
+
+            // Manual Logs Listener (now includes Pomodoro sessions)
+            const manualLogsCollectionPath = `artifacts/${appId}/users/${userId}/manualLogs`;
+            onSnapshot(collection(db, manualLogsCollectionPath), (snapshot) => {
+                console.log(`Listening to: ${manualLogsCollectionPath}`);
+                manualLogs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                manualLogs.sort((a, b) => new Date(b.date) - new Date(a.date));
+                renderManualLogs();
+                updateStudyTimeChart(); // Update the study time chart whenever logs change
+            }, (error) => {
+                console.error("Error listening to manual logs:", error);
+                showModal("ERROR LOADING MANUAL LOGS. PLEASE TRY AGAIN.");
+            });
+
+            // Events Listener
+            const eventsCollectionPath = `artifacts/${appId}/users/${userId}/events`;
+            onSnapshot(collection(db, eventsCollectionPath), (snapshot) => {
+                console.log(`Listening to: ${eventsCollectionPath}`);
+                events = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                events.sort((a, b) => new Date(a.date) - new Date(b.date));
+                renderCalendar(currentDate); // Re-render calendar to show events
+                renderEventsForSelectedDate(selectedCalendarDate); // Update events list for selected date
+            }, (error) => {
+                console.error("Error listening to events:", error);
+                showModal("ERROR LOADING EVENTS. PLEASE TRY AGAIN.");
+            });
+
+            // Notes Listener
+            const notesCollectionPath = `artifacts/${appId}/users/${userId}/notes`;
+            onSnapshot(collection(db, notesCollectionPath), (snapshot) => {
+                console.log(`Listening to: ${notesCollectionPath}`);
+                notes = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                notes.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)); // Sort by newest first
+                renderNotes();
+            }, (error) => {
+                console.error("Error listening to notes:", error);
+                showModal("ERROR LOADING NOTES. PLEASE TRY AGAIN.");
+            });
+        }
+
+        // --- Authentication Functions ---
+
+        /**
+         * Handles user signup.
+         */
+        async function handleSignup(event) {
+            event.preventDefault();
+            showLoading();
+
+            const email = document.getElementById('signupEmail').value.trim(); // Changed from username to email
+            const username = document.getElementById('signupUsername').value.trim();
+            const password = document.getElementById('signupPassword').value.trim();
+            const confirmPassword = document.getElementById('signupConfirmPassword').value.trim();
+            const fullName = document.getElementById('signupFullName').value.trim();
+            const grade = document.getElementById('signupGrade').value.trim();
+            const className = document.getElementById('signupClass').value.trim();
+            const interests = document.getElementById('signupInterests').value.trim();
+            const skills = document.getElementById('signupSkills').value.trim();
+
+            if (!email || !username || !password || !confirmPassword || !fullName || !grade || !className) {
+                hideLoading();
+                showModal("PLEASE FILL IN ALL REQUIRED FIELDS (EMAIL, USERNAME, PASSWORD, FULL NAME, GRADE, CLASS).");
+                return;
+            }
+
+            if (password !== confirmPassword) {
+                hideLoading();
+                showModal("PASSWORDS DO NOT MATCH.");
+                return;
+            }
+
+            if (password.length < 6) {
+                hideLoading();
+                showModal("PASSWORD MUST BE AT LEAST 6 CHARACTERS LONG.");
+                return;
+            }
+
+            try {
+                // Create user with email and password
+                const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+                const user = userCredential.user;
+                const uid = user.uid;
+
+                // Check if username already exists (optional, but good for display names)
+                const usernameDocPath = `artifacts/${appId}/usernameToUid/${username}`;
+                const usernameDocRef = doc(db, usernameDocPath);
+                const usernameDocSnap = await getDoc(usernameDocRef);
+
+                if (usernameDocSnap.exists()) {
+                    // If username exists, delete the newly created auth user and inform.
+                    await user.delete();
+                    hideLoading();
+                    showModal("USERNAME ALREADY TAKEN. PLEASE CHOOSE ANOTHER.");
+                    return;
+                }
+                
+                // Store user profile in Firestore
+                const userProfilePath = `artifacts/${appId}/users/${uid}/profile/userDoc`;
+                const userProfileRef = doc(db, userProfilePath);
+                console.log(`Setting user profile at: ${userProfilePath}`);
+                await setDoc(userProfileRef, {
+                    email: email,
+                    username: username,
+                    fullName: fullName,
+                    grade: grade,
+                    class: className,
+                    interests: interests,
+                    skills: skills,
+                    createdAt: new Date().toISOString()
+                });
+
+                // Store a mapping from username to UID for display/lookup
+                const usernameToUidPath = `artifacts/${appId}/usernameToUid/${username}`;
+                console.log(`Setting username to UID mapping at: ${usernameToUidPath}`);
+                await setDoc(doc(db, usernameToUidPath), { uid: uid, email: email });
+
+                loggedInUsername = username;
+                userId = uid;
+                hasDeadlinesLoadedInitial = false; // Reset for new user
+                setupFirestoreListeners(); // Set up listeners for the new user
+                hideLoading();
+                showModal("ACCOUNT CREATED SUCCESSFULLY! WELCOME TO STUDY TRACKER PRO.", "success");
+                showPage('dashboardPage');
+
+            } catch (error) {
+                console.error("Error during signup:", error);
+                hideLoading();
+                let errorMessage = "SIGNUP FAILED. PLEASE TRY AGAIN.";
+                if (error.code === 'auth/email-already-in-use') {
+                    errorMessage = "THIS EMAIL ADDRESS IS ALREADY IN USE.";
+                } else if (error.code === 'auth/invalid-email') {
+                    errorMessage = "PLEASE ENTER A VALID EMAIL ADDRESS.";
+                } else if (error.code === 'auth/weak-password') {
+                    errorMessage = "PASSWORD IS TOO WEAK. PLEASE CHOOSE A STRONGER PASSWORD.";
+                }
+                showModal(errorMessage);
+            }
+        }
+
+        /**
+         * Handles user login.
+         */
+        async function handleLogin(event) {
+            event.preventDefault();
+            showLoading();
+
+            const email = document.getElementById('loginEmail').value.trim(); // Changed from username to email
+            const password = document.getElementById('loginPassword').value;
+
+            if (!email || !password) {
+                hideLoading();
+                showModal("PLEASE ENTER BOTH EMAIL AND PASSWORD.");
+                return;
+            }
+
+            try {
+                const userCredential = await signInWithEmailAndPassword(auth, email, password);
+                const user = userCredential.user;
+                const uid = user.uid;
+
+                // Fetch username from the user's profile document
+                const userProfilePath = `artifacts/${appId}/users/${uid}/profile/userDoc`;
+                const userProfileRef = doc(db, userProfilePath);
+                console.log(`Fetching user profile for existing session from: ${userProfilePath}`);
+                const userProfileSnap = await getDoc(userProfileRef);
+
+                if (!userProfileSnap.exists()) {
+                    hideLoading();
+                    showModal("USER PROFILE NOT FOUND. PLEASE CONTACT SUPPORT OR SIGN UP.", "error");
+                    await signOut(auth); // Sign out if profile not found
+                    return;
+                }
+
+                loggedInUsername = userProfileSnap.data().username;
+                userId = uid; // Set userId to the authenticated UID
+                hasDeadlinesLoadedInitial = false; // Reset flag on login
+                setupFirestoreListeners(); // Set up listeners for the logged-in user's data
+                hideLoading();
+                showModal(`WELCOME BACK, ${loggedInUsername}!`, "success");
+                showPage('dashboardPage');
+                // scheduleDeadlineNotifications() is now called within the deadlines onSnapshot listener
+            } catch (error) {
+                console.error("Error during login:", error);
+                hideLoading();
+                let errorMessage = "LOGIN FAILED. PLEASE TRY AGAIN.";
+                if (error.code === 'auth/invalid-credential') { // Covers auth/wrong-password and auth/user-not-found
+                    errorMessage = "INVALID EMAIL OR PASSWORD.";
+                } else if (error.code === 'auth/user-disabled') {
+                    errorMessage = "YOUR ACCOUNT HAS BEEN DISABLED.";
+                } else if (error.code === 'auth/invalid-email') {
+                    errorMessage = "PLEASE ENTER A VALID EMAIL ADDRESS.";
+                }
+                showModal(errorMessage);
+            }
+        }
+
+        /**
+         * Logs out the user.
+         */
+        async function logout() {
+            showLoading();
+            try {
+                await signOut(auth); // Sign out from Firebase Auth
+                loggedInUsername = null;
+                userId = null;
+                // Clear in-memory data (listeners will stop automatically on sign out)
+                studyScores = [];
+                achievements = [];
+                deadlines = [];
+                todos = [];
+                manualLogs = [];
+                events = [];
+                notes = []; // Clear notes on logout
+                editingNoteId = null; // Clear editing state
+                hasDeadlinesLoadedInitial = false; // Reset flag on logout
+
+                // Clear the notification interval on logout
+                if (window.deadlineNotificationInterval) {
+                    clearInterval(window.deadlineNotificationInterval);
+                    window.deadlineNotificationInterval = null;
+                    console.log("Previous notification interval cleared.");
+                }
+
+                hideLoading();
+                showModal("LOGGED OUT SUCCESSFULLY.", "info");
+                showPage('welcomePage'); // Go back to welcome page
+            } catch (error) {
+                console.error("Error during logout:", error);
+                hideLoading();
+                showModal(`LOGOUT FAILED: ${error.message}`);
+            }
+        }
+        window.logout = logout; // Make globally accessible
+
+        // --- Profile Functions ---
+        /**
+         * Renders the user's profile details on the profile page.
+         */
+        async function renderProfileDetails() {
+            if (!userId) {
+                document.getElementById('profileEmail').textContent = 'N/A'; // Changed from username
+                document.getElementById('profileUsername').textContent = 'N/A';
+                document.getElementById('profileFullName').textContent = 'N/A';
+                document.getElementById('profileGrade').textContent = 'N/A';
+                document.getElementById('profileClass').textContent = 'N/A';
+                document.getElementById('profileInterests').textContent = 'N/A';
+                document.getElementById('profileSkills').textContent = 'N/A';
+                return;
+            }
+
+            try {
+                const userProfilePath = `artifacts/${appId}/users/${userId}/profile/userDoc`;
+                const userProfileRef = doc(db, userProfilePath);
+                console.log(`Fetching profile details from: ${userProfilePath}`);
+                const userProfileSnap = await getDoc(userProfileRef);
+
+                if (userProfileSnap.exists()) {
+                    const user = userProfileSnap.data();
+                    document.getElementById('profileEmail').textContent = user.email || 'N/A'; // Changed from username
+                    document.getElementById('profileUsername').textContent = user.username || 'N/A';
+                    document.getElementById('profileFullName').textContent = user.fullName || 'N/A';
+                    document.getElementById('profileGrade').textContent = user.grade || 'N/A';
+                    document.getElementById('profileClass').textContent = user.class || 'N/A';
+                    document.getElementById('profileInterests').textContent = user.interests || 'N/A';
+                    document.getElementById('profileSkills').textContent = user.skills || 'N/A';
+                } else {
+                    console.warn("User profile document not found for current user ID:", userId);
+                    showModal("YOUR PROFILE DATA COULD NOT BE LOADED.");
+                }
+            } catch (error) {
+                console.error("Error fetching profile details:", error);
+                showModal("ERROR LOADING PROFILE DETAILS. PLEASE TRY AGAIN.");
+            }
+        }
+
+        /**
+         * Handles changing the user's password.
+         */
+        async function changePassword() {
+            if (!userId) {
+                showModal("PLEASE LOG IN TO CHANGE YOUR PASSWORD.");
+                return;
+            }
+            showLoading();
+
+            const newPassword = document.getElementById('newPassword').value.trim();
+            const confirmNewPassword = document.getElementById('confirmNewPassword').value.trim();
+
+            if (!newPassword || !confirmNewPassword) {
+                hideLoading();
+                showModal("PLEASE FILL IN ALL PASSWORD FIELDS.");
+                return;
+            }
+
+            if (newPassword.length < 6) {
+                hideLoading();
+                showModal("PASSWORD MUST BE AT LEAST 6 CHARACTERS LONG.");
+                return;
+            }
+
+            if (newPassword !== confirmNewPassword) {
+                hideLoading();
+                showModal("NEW PASSWORDS DO NOT MATCH.");
+                return;
+            }
+
+            try {
+                const user = auth.currentUser;
+                if (user) {
+                    // Firebase Auth handles password updates directly on the user object
+                    await user.updatePassword(newPassword);
+
+                    // Clear password fields
+                    document.getElementById('oldPassword').value = ''; // This field is no longer functionally used for auth, but kept for UI consistency
+                    document.getElementById('newPassword').value = '';
+                    document.getElementById('confirmNewPassword').value = '';
+
+                    hideLoading();
+                    showModal("PASSWORD CHANGED SUCCESSFULLY! PLEASE LOG IN AGAIN WITH YOUR NEW PASSWORD.", "success");
+                    await signOut(auth); // Force re-login with new password
+                    showPage('loginPage');
+                } else {
+                    hideLoading();
+                    showModal("NO AUTHENTICATED USER FOUND. PLEASE LOG IN.");
+                }
+
+            } catch (error) {
+                console.error("Error changing password:", error);
+                hideLoading();
+                let errorMessage = `FAILED TO CHANGE PASSWORD: ${error.message}`;
+                if (error.code === 'auth/requires-recent-login') {
+                    errorMessage = "PLEASE RE-AUTHENTICATE BY LOGGING IN AGAIN BEFORE CHANGING YOUR PASSWORD.";
+                }
+                showModal(errorMessage);
+            }
+        }
+        window.changePassword = changePassword; // Make globally accessible
+
+
+        // --- Progress Tracker Functions ---
+
+        /**
+         * Adds a new study score to Firestore.
+         */
+        async function addStudyScore() {
+            if (!userId) {
+                showModal("PLEASE LOG IN OR SIGN UP TO ADD SCORES.");
+                return;
+            }
+            showLoading();
+            const subject = document.getElementById('studySubject').value.trim();
+            const score = parseInt(document.getElementById('studyScore').value);
+            const date = document.getElementById('studyDate').value;
+
+            if (!subject || isNaN(score) || score < 0 || score > 100 || !date) {
+                hideLoading();
+                showModal("PLEASE ENTER A VALID SUBJECT, SCORE (0-100), AND DATE.");
+                return;
+            }
+
+            try {
+                const collectionPath = `artifacts/${appId}/users/${userId}/studyScores`;
+                console.log(`Attempting to add document to: ${collectionPath}`);
+                const newScore = {
+                    subject,
+                    score,
+                    date,
+                    timestamp: new Date().toISOString()
+                };
+                await addDoc(collection(db, collectionPath), newScore);
+                document.getElementById('studySubject').value = '';
+                document.getElementById('studyScore').value = '';
+                document.getElementById('studyDate').value = '';
+                hideLoading();
+                showModal("STUDY SCORE ADDED SUCCESSFULLY!", "success");
+            } catch (error) {
+                console.error(`Error adding study score to artifacts/${appId}/users/${userId}/studyScores:`, error);
+                hideLoading();
+                showModal("ERROR ADDING STUDY SCORE. PLEASE TRY AGAIN.");
+            }
+        }
+        window.addStudyScore = addStudyScore; // Make globally accessible
+
+        /**
+         * Deletes a study score from Firestore.
+         * @param {string} id The ID of the score to delete.
+         */
+        async function deleteStudyScore(id) {
+            if (!userId) return;
+            showLoading();
+            try {
+                const docPath = `artifacts/${appId}/users/${userId}/studyScores/${id}`;
+                console.log(`Attempting to delete document from: ${docPath}`);
+                await deleteDoc(doc(db, docPath));
+                hideLoading();
+                showModal("STUDY SCORE DELETED.", "info");
+            } catch (error) {
+                console.error(`Error deleting study score from artifacts/${appId}/users/${userId}/studyScores/${id}:`, error);
+                hideLoading();
+                showModal("ERROR DELETING STUDY SCORE. PLEASE TRY AGAIN.");
+            }
+        }
+        window.deleteStudyScore = deleteStudyScore; // Make globally accessible
+
+        /**
+         * Renders the list of study scores.
+         */
+        function renderStudyScores() {
+            const listContainer = document.getElementById('studyScoreList');
+            listContainer.innerHTML = ''; // Clear previous list
+
+            if (studyScores.length === 0) {
+                listContainer.innerHTML = '<p class="feature-placeholder">NO STUDY SCORES LOGGED YET.</p>';
+                return;
+            }
+
+            studyScores.forEach(score => {
+                const item = document.createElement('div');
+                item.className = 'score-list-item';
+                item.innerHTML = `
+                    <span><span class="score-subject">${score.subject}</span> &bull; <span class="score-value">${score.score}/100</span> &bull; <span class="score-date">${score.date}</span></span>
+                    <button class="delete-btn" onclick="deleteStudyScore('${score.id}')">DELETE</button>
+                `;
+                listContainer.appendChild(item);
+            });
+        }
+
+        /**
+         * Updates the Chart.js graph with current study scores.
+         */
+        function updateStudyChart() {
+            let ctx = document.getElementById('studyProgressChart').getContext('2d');
+
+            const labels = studyScores.map(score => score.date);
+            const data = studyScores.map(score => score.score);
+
+            console.log("updateStudyChart called.");
+            console.log("Current studyScores:", studyScores);
+            console.log("Labels for chart:", labels);
+            console.log("Data for chart:", data);
+
+            if (studyChart) {
+                studyChart.destroy();
+                console.log("Existing chart destroyed.");
+            }
+
+            const chartContainer = document.querySelector('.chart-container');
+            // Ensure the canvas element is always present for the chart
+            if (!chartContainer.querySelector('canvas')) {
+                chartContainer.innerHTML = '<canvas id="studyProgressChart"></canvas>';
+                ctx = document.getElementById('studyProgressChart').getContext('2d');
+            }
+
+            if (labels.length === 0) {
+                chartContainer.innerHTML = '<p class="feature-placeholder" style="margin:0; padding:30px;">NO STUDY SCORES TO DISPLAY ON THE CHART YET. ADD SOME SCORES!</p>';
+                return; // Exit if no data
+            }
+
+            studyChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'STUDY SCORE',
+                        data: data,
+                        borderColor: '#00FFFF', /* Electric Cyan */
+                        backgroundColor: 'rgba(0, 255, 255, 0.2)', /* Transparent Electric Cyan fill */
+                        tension: 0.4, /* Smoother curves */
+                        fill: true,
+                        pointBackgroundColor: '#8A2BE2', /* Blue Violet for points */
+                        pointBorderColor: 'rgba(255, 255, 255, 0.6)', /* White border for points */
+                        pointBorderWidth: 1.5,
+                        pointRadius: 6, /* Larger, more prominent points */
+                        pointHoverRadius: 9
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        title: {
+                            display: true,
+                            text: 'PROGRESS OVERVIEW',
+                            font: {
+                                size: 20,
+                                weight: '600',
+                                family: "'Exo 2', sans-serif",
+                            },
+                            color: '#8A2BE2' /* Blue Violet */
+                        },
+                        legend: {
+                            display: false
+                        }
+                    },
+                    scales: {
+                        x: {
+                            title: {
+                                display: true,
+                                text: 'DATE',
+                                color: '#00FFFF', /* Electric Cyan */
+                                font: { family: "'Exo 2', sans-serif" }
+                            },
+                            ticks: {
+                                color: '#E0E0E0', /* Soft White */
+                                font: { family: "'Exo 2', sans-serif" }
+                            },
+                            grid: {
+                                color: 'rgba(255, 255, 255, 0.1)',
+                                lineWidth: 1,
+                                borderDash: [5, 5]
+                            }
+                        },
+                        y: {
+                            title: {
+                                display: true,
+                                text: 'SCORE (0-100)',
+                                color: '#00FFFF', /* Electric Cyan */
+                                font: { family: "'Exo 2', sans-serif" }
+                            },
+                            min: 0,
+                            max: 100,
+                            ticks: {
+                                color: '#E0E0E0',
+                                font: { family: "'Exo 2', sans-serif" }
+                            },
+                            grid: {
+                                color: 'rgba(255, 255, 255, 0.1)',
+                                lineWidth: 1,
+                                borderDash: [5, 5]
+                            }
+                        }
+                    }
+                }
+            });
+            console.log("New chart created.");
+        }
+
+        // --- Achievements Functions ---
+
+        /**
+         * Adds a new achievement to Firestore.
+         */
+        async function addAchievement() {
+            if (!userId) {
+                showModal("ACCESS DENIED: PLEASE LOG IN.");
+                return;
+            }
+            showLoading();
+            const title = document.getElementById('achievementTitle').value.trim();
+            const description = document.getElementById('achievementDescription').value.trim();
+            const date = document.getElementById('achievementDate').value;
+
+            if (!title || !date) {
+                hideLoading();
+                showModal("INPUT ERROR: TITLE AND DATE ARE REQUIRED.");
+                return;
+            }
+
+            try {
+                const collectionPath = `artifacts/${appId}/users/${userId}/achievements`;
+                console.log(`Attempting to add achievement to: ${collectionPath}`);
+                const newAchievement = {
+                    title,
+                    description,
+                    date,
+                    timestamp: new Date().toISOString()
+                };
+                await addDoc(collection(db, collectionPath), newAchievement);
+                document.getElementById('achievementTitle').value = '';
+                document.getElementById('achievementDescription').value = '';
+                document.getElementById('achievementDate').value = '';
+                hideLoading();
+                showModal("ACHIEVEMENT LOGGED SUCCESSFULLY.", "success");
+            } catch (error) {
+                console.error(`Error adding achievement to artifacts/${appId}/users/${userId}/achievements:`, error);
+                hideLoading();
+                showModal("DATA ERROR: ACHIEVEMENT LOG FAILED. PLEASE RETRY.", "error");
+            }
+        }
+        window.addAchievement = addAchievement; // Make globally accessible
+
+        /**
+         * Deletes an achievement from Firestore.
+         * @param {string} id The ID of the achievement to delete.
+         */
+        async function deleteAchievement(id) {
+            if (!userId) return;
+            showLoading();
+            try {
+                const docPath = `artifacts/${appId}/users/${userId}/achievements/${id}`;
+                console.log(`Attempting to delete achievement from: ${docPath}`);
+                await deleteDoc(doc(db, docPath));
+                hideLoading();
+                showModal("ACHIEVEMENT DELETED.", "info");
+            } catch (error) {
+                console.error(`Error deleting achievement from artifacts/${appId}/users/${userId}/achievements/${id}:`, error);
+                hideLoading();
+                showModal("ERROR: DELETION FAILED. PLEASE RETRY.", "error");
+            }
+        }
+        window.deleteAchievement = deleteAchievement; // Make globally accessible
+
+        /**
+         * Renders the list of achievements.
+         */
+        function renderAchievements() {
+            const listContainer = document.getElementById('achievementList');
+            listContainer.innerHTML = '';
+
+            if (achievements.length === 0) {
+                listContainer.innerHTML = '<p class="feature-placeholder">NO ACHIEVEMENTS RECORDED YET.</p>';
+                return;
+            }
+
+            achievements.forEach(achievement => {
+                const item = document.createElement('div');
+                item.className = 'achievement-list-item';
+                item.innerHTML = `
+                    <span><span class="achievement-title">${achievement.title}</span> &bull; <span class="achievement-date">${achievement.date}</span>
+                        ${achievement.description ? `<br><small>${achievement.description}</small>` : ''}
+                    </span>
+                    <button class="delete-btn" onclick="deleteAchievement('${achievement.id}')">DELETE</button>
+                `;
+                listContainer.appendChild(item);
+            });
+        }
+
+        // --- Deadlines Functions ---
+
+        /**
+         * Adds a new deadline to Firestore.
+         */
+        async function addDeadline() {
+            if (!userId) {
+                showModal("ACCESS DENIED: PLEASE LOG IN.");
+                return;
+            }
+            showLoading();
+            const title = document.getElementById('deadlineTitle').value.trim();
+            const description = document.getElementById('deadlineDescription').value.trim();
+            const date = document.getElementById('deadlineDate').value;
+
+            if (!title || !date) {
+                hideLoading();
+                showModal("INPUT ERROR: TITLE AND DATE ARE REQUIRED.");
+                return;
+            }
+
+            try {
+                const collectionPath = `artifacts/${appId}/users/${userId}/deadlines`;
+                console.log(`Attempting to add deadline to: ${collectionPath}`);
+                const newDeadline = {
+                    title,
+                    description,
+                    date,
+                    timestamp: new Date().toISOString()
+                };
+                await addDoc(collection(db, collectionPath), newDeadline);
+                document.getElementById('deadlineTitle').value = '';
+                document.getElementById('deadlineDescription').value = '';
+                document.getElementById('deadlineDate').value = '';
+                hideLoading();
+                showModal("DEADLINE ADDED SUCCESSFULLY.", "success");
+            } catch (error) {
+                console.error(`Error adding deadline to artifacts/${appId}/users/${userId}/deadlines:`, error);
+                hideLoading();
+                showModal("DATA ERROR: DEADLINE LOG FAILED. PLEASE RETRY.", "error");
+            }
+        }
+        window.addDeadline = addDeadline; // Make globally accessible
+
+        /**
+         * Deletes a deadline from Firestore.
+         * @param {string} id The ID of the deadline to delete.
+         */
+        async function deleteDeadline(id) {
+            if (!userId) return;
+            showLoading();
+            try {
+                const docPath = `artifacts/${appId}/users/${userId}/deadlines/${id}`;
+                console.log(`Attempting to delete deadline from: ${docPath}`);
+                await deleteDoc(doc(db, docPath));
+                hideLoading();
+                showModal("DEADLINE DELETED.", "info");
+            } catch (error) {
+                console.error(`Error deleting deadline from artifacts/${appId}/users/${userId}/deadlines/${id}:`, error);
+                hideLoading();
+                showModal("ERROR: DELETION FAILED. PLEASE RETRY.", "error");
+            }
+        }
+        window.deleteDeadline = deleteDeadline; // Make globally accessible
+
+        /**
+         * Renders the list of deadlines.
+         */
+        function renderDeadlines() {
+            const listContainer = document.getElementById('deadlineList');
+            listContainer.innerHTML = '';
+
+            if (deadlines.length === 0) {
+                listContainer.innerHTML = '<p class="feature-placeholder">NO DEADLINES SET YET.</p>';
+                return;
+            }
+
+            deadlines.forEach(deadline => {
+                const item = document.createElement('div');
+                item.className = 'deadline-list-item';
+                item.innerHTML = `
+                    <span><span class="deadline-title">${deadline.title}</span> &bull; DUE: <span class="deadline-date">${deadline.date}</span>
+                        ${deadline.description ? `<br><small>${deadline.description}</small>` : ''}
+                    </span>
+                    <button class="delete-btn" onclick="deleteDeadline('${deadline.id}')">DELETE</button>
+                `;
+                listContainer.appendChild(item);
+            });
+        }
+
+        // --- To-Do List Functions ---
+
+        /**
+         * Adds a new to-do item to Firestore.
+         */
+        async function addTodo() {
+            if (!userId) {
+                showModal("ACCESS DENIED: PLEASE LOG IN.");
+                return;
+            }
+            showLoading();
+            const task = document.getElementById('todoTask').value.trim();
+
+            if (!task) {
+                hideLoading();
+                showModal("INPUT ERROR: TASK DESCRIPTION REQUIRED.");
+                return;
+            }
+
+            try {
+                const collectionPath = `artifacts/${appId}/users/${userId}/todos`;
+                console.log(`Attempting to add todo to: ${collectionPath}`);
+                const newTodo = {
+                    task,
+                    completed: false,
+                    timestamp: new Date().toISOString()
+                };
+                await addDoc(collection(db, collectionPath), newTodo);
+                document.getElementById('todoTask').value = '';
+                hideLoading();
+                showModal("TASK ADDED SUCCESSFULLY.", "success");
+            } catch (error) {
+                console.error(`Error adding todo to artifacts/${appId}/users/${userId}/todos:`, error);
+                hideLoading();
+                showModal("DATA ERROR: TASK LOG FAILED. PLEASE RETRY.", "error");
+            }
+        }
+        window.addTodo = addTodo; // Make globally accessible
+
+        /**
+         * Toggles the completion status of a to-do item in Firestore.
+         * @param {string} id The ID of the to-do item.
+         * @param {boolean} currentStatus The current completion status.
+         */
+        async function toggleTodoComplete(id, currentStatus) {
+            if (!userId) return;
+            showLoading();
+            try {
+                const docPath = `artifacts/${appId}/users/${userId}/todos/${id}`;
+                const todoRef = doc(db, docPath);
+                console.log(`Attempting to toggle todo status for: ${docPath}`);
+                await updateDoc(todoRef, { completed: !currentStatus });
+                hideLoading();
+                showModal("TASK STATUS UPDATED.", "info");
+            } catch (error) {
+                console.error(`Error toggling todo status for artifacts/${appId}/users/${userId}/todos/${id}:`, error);
+                hideLoading();
+                showModal("ERROR: STATUS UPDATE FAILED. PLEASE RETRY.", "error");
+            }
+        }
+        window.toggleTodoComplete = toggleTodoComplete; // Make globally accessible
+
+        /**
+         * Deletes a to-do item from Firestore.
+         * @param {string} id The ID of the to-do item to delete.
+         */
+        async function deleteTodo(id) {
+            if (!userId) return;
+            showLoading();
+            try {
+                const docPath = `artifacts/${appId}/users/${userId}/todos/${id}`;
+                console.log(`Attempting to delete todo from: ${docPath}`);
+                await deleteDoc(doc(db, docPath));
+                hideLoading();
+                showModal("TASK DELETED.", "info");
+            } catch (error) {
+                console.error(`Error deleting todo from artifacts/${appId}/users/${userId}/todos/${id}:`, error);
+                hideLoading();
+                showModal("ERROR: DELETION FAILED. PLEASE RETRY.", "error");
+            }
+        }
+        window.deleteTodo = deleteTodo; // Make globally accessible
+
+        /**
+         * Renders the list of to-do items.
+         */
+        function renderTodos() {
+            const listContainer = document.getElementById('todoList');
+            listContainer.innerHTML = '';
+
+            if (todos.length === 0) {
+                listContainer.innerHTML = '<p class="feature-placeholder">NO TASKS IN YOUR QUEUE.</p>';
+                return;
+            }
+
+            todos.forEach(todo => {
+                const item = document.createElement('div');
+                item.className = `todo-list-item ${todo.completed ? 'completed' : ''}`;
+                item.innerHTML = `
+                    <span>${todo.task}</span>
+                    <div>
+                        <button class="complete-btn" onclick="toggleTodoComplete('${todo.id}', ${todo.completed})">
+                            ${todo.completed ? 'UNDO' : 'COMPLETE'}
+                        </button>
+                        <button class="delete-btn" onclick="deleteTodo('${todo.id}')">DELETE</button>
+                    </div>
+                `;
+                listContainer.appendChild(item);
+            });
+        }
+
+        // --- Time Tracker (Pomodoro) Functions ---
+
+        /**
+         * Updates the timer display to HH:MM:SS format.
+         */
+        function updateTimerDisplay() {
+            const hours = Math.floor(timeLeft / 3600);
+            const minutes = Math.floor((timeLeft % 3600) / 60);
+            const seconds = timeLeft % 60;
+
+            const formattedHours = String(hours).padStart(2, '0');
+            const formattedMinutes = String(minutes).padStart(2, '0');
+            const formattedSeconds = String(seconds).padStart(2, '0');
+
+            document.getElementById('timerDisplay').textContent =
+                `${formattedHours}:${formattedMinutes}:${formattedSeconds}`;
+        }
+
+        /**
+         * Starts the Pomodoro timer.
+         */
+        function startTimer() {
+            if (timerRunning) return;
+            timerRunning = true;
+            document.getElementById('startTimerBtn').disabled = true;
+            document.getElementById('pauseTimerBtn').disabled = false;
+            document.getElementById('logTimerSessionBtn').disabled = true; // Disable log button while running
+            document.getElementById('timerLogMessage').textContent = 'TIMER ACTIVE. SESSION INITIATED.';
+
+            timerInterval = setInterval(() => {
+                timeLeft++;
+                updateTimerDisplay();
+            }, 1000);
+        }
+
+        /**
+         * Pauses the Pomodoro timer.
+         */
+        function pauseTimer() {
+            if (!timerRunning) return;
+            timerRunning = false;
+            clearInterval(timerInterval);
+            document.getElementById('startTimerBtn').disabled = false;
+            document.getElementById('pauseTimerBtn').disabled = true;
+            document.getElementById('logTimerSessionBtn').disabled = false; // Enable log button on pause
+            document.getElementById('timerLogMessage').textContent = 'TIMER PAUSED. SESSION SUSPENDED.';
+        }
+
+        /**
+         * Resets the Pomodoro timer.
+         */
+        function resetTimer() {
+            clearInterval(timerInterval);
+            timerRunning = false;
+            timeLeft = 0;
+            updateTimerDisplay();
+            document.getElementById('startTimerBtn').disabled = false;
+            document.getElementById('pauseTimerBtn').disabled = true;
+            document.getElementById('logTimerSessionBtn').disabled = true; // Disable log button after reset
+            document.getElementById('timerLogMessage').textContent = 'TIMER RESET. SESSION TERMINATED.';
+        }
+
+        /**
+         * Logs the current Pomodoro timer session as a manual log.
+         */
+        async function logTimerSession() {
+            if (!userId) {
+                showModal("ACCESS DENIED: PLEASE LOG IN TO LOG SESSIONS.");
+                return;
+            }
+
+            if (timeLeft === 0) {
+                showModal("NO TIME TO LOG. START THE TIMER FIRST.");
+                return;
+            }
+
+            const totalMinutes = Math.floor(timeLeft / 60);
+            const hours = Math.floor(totalMinutes / 60);
+            const minutes = totalMinutes % 60;
+            const today = new Date().toISOString().split('T')[0]; // Current date for the log
+
+            // Use the existing addManualLog function
+            await addManualLog(hours, minutes, 'Pomodoro Session', today);
+            resetTimer(); // Reset timer after logging
+            showModal("POMODORO SESSION LOGGED SUCCESSFULLY!", "success");
+        }
+        window.logTimerSession = logTimerSession; // Make globally accessible
+
+        /**
+         * Adds a manual study log to Firestore.
+         * @param {number|null} hours The hours to log (optional, for programmatic logs).
+         * @param {number|null} minutes The minutes to log (optional, for programmatic logs).
+         * @param {string|null} subject The subject (optional, for programmatic logs).
+         * @param {string|null} date The date (optional, for programmatic logs).
+         */
+        async function addManualLog(hours = null, minutes = null, subject = null, date = null) {
+            if (!userId) {
+                showModal("ACCESS DENIED: PLEASE LOG IN.");
+                return;
+            }
+            showLoading();
+
+            const logHours = hours !== null ? hours : parseInt(document.getElementById('manualHours').value);
+            const logMinutes = minutes !== null ? minutes : parseInt(document.getElementById('manualMinutes').value);
+            const logSubject = subject !== null ? subject : document.getElementById('manualSubject').value.trim();
+            const logDate = date !== null ? date : document.getElementById('manualLogDate').value;
+
+            if (isNaN(logHours) || isNaN(logMinutes) || logHours < 0 || logMinutes < 0 || logMinutes > 59 || !logSubject || !logDate) {
+                hideLoading();
+                showModal("INPUT ERROR: VALID TIME, SUBJECT, AND DATE ARE REQUIRED.");
+                return;
+            }
+
+            const totalMinutes = (logHours * 60) + logMinutes;
+            if (totalMinutes === 0) {
+                hideLoading();
+                showModal("INPUT ERROR: LOGGED TIME MUST BE GREATER THAN ZERO.");
+                return;
+            }
+
+            try {
+                const collectionPath = `artifacts/${appId}/users/${userId}/manualLogs`;
+                console.log(`Attempting to add manual log to: ${collectionPath}`);
+                const newLog = {
+                    hours: logHours,
+                    minutes: logMinutes,
+                    totalMinutes: totalMinutes,
+                    subject: logSubject,
+                    date: logDate,
+                    timestamp: new Date().toISOString()
+                };
+                await addDoc(collection(db, collectionPath), newLog);
+                
+                // Clear manual log form only if it was a manual entry, not from Pomodoro
+                if (hours === null) {
+                    document.getElementById('manualHours').value = '0';
+                    document.getElementById('manualMinutes').value = '0';
+                    document.getElementById('manualSubject').value = '';
+                    document.getElementById('manualLogDate').value = '';
+                }
+                
+                hideLoading();
+                showModal("STUDY TIME LOGGED SUCCESSFULLY.", "success");
+            } catch (error) {
+                console.error(`Error adding manual log to artifacts/${appId}/users/${userId}/manualLogs:`, error);
+                hideLoading();
+                showModal("DATA ERROR: LOG FAILED. PLEASE RETRY.", "error");
+            }
+        }
+        window.addManualLog = addManualLog; // Make globally accessible
+
+        /**
+         * Deletes a manual study log from Firestore.
+         * @param {string} id The ID of the log to delete.
+         */
+        async function deleteManualLog(id) {
+            if (!userId) return;
+            showLoading();
+            try {
+                const docPath = `artifacts/${appId}/users/${userId}/manualLogs/${id}`;
+                console.log(`Attempting to delete manual log from: ${docPath}`);
+                await deleteDoc(doc(db, docPath));
+                hideLoading();
+                showModal("STUDY LOG DELETED.", "info");
+            } catch (error) {
+                console.error(`Error deleting manual log from artifacts/${appId}/users/${userId}/manualLogs/${id}:`, error);
+                hideLoading();
+                showModal("ERROR: DELETION FAILED. PLEASE RETRY.", "error");
+            }
+        }
+        window.deleteManualLog = deleteManualLog; // Make globally accessible
+
+        /**
+         * Renders the list of manual study logs.
+         */
+        function renderManualLogs() {
+            const listContainer = document.getElementById('manualLogList');
+            listContainer.innerHTML = '';
+
+            if (manualLogs.length === 0) {
+                listContainer.innerHTML = '<p class="feature-placeholder">NO MANUAL STUDY LOGS YET.</p>';
+                return;
+            }
+
+            manualLogs.forEach(log => {
+                const item = document.createElement('div');
+                item.className = 'score-list-item'; // Reusing score-list-item style
+                item.innerHTML = `
+                    <span><span class="log-subject">${log.subject}</span> &bull; <span class="log-time">${log.hours}H ${log.minutes}M</span> &bull; <span class="log-date">${log.date}</span></span>
+                    <button class="delete-btn" onclick="deleteManualLog('${log.id}')">DELETE</button>
+                `;
+                listContainer.appendChild(item);
+            });
+        }
+
+        // --- Study Time Chart Functions ---
+
+        /**
+         * Gets the start of the week (Monday) for a given date.
+         * @param {Date} date
+         * @returns {string} YYYY-MM-DD format of the Monday of the week.
+         */
+        function getWeekStartDate(date) {
+            const d = new Date(date);
+            const dayOfWeek = d.getDay(); // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
+            const diff = dayOfWeek === 0 ? 6 : dayOfWeek - 1; // Calculate days to subtract to get to Monday (if Sunday, subtract 6)
+            d.setDate(d.getDate() - diff);
+            return d.toISOString().split('T')[0];
+        }
+
+        /**
+         * Gets the month string for a given date.
+         * @param {Date} date
+         * @returns {string} YYYY-MM format.
+         */
+        function getMonthString(date) {
+            const d = new Date(date);
+            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        }
+
+        /**
+         * Updates the Chart.js graph for study time with current logs.
+         */
+        function updateStudyTimeChart() {
+            console.log("--- updateStudyTimeChart called ---");
+            console.log("Current manualLogs:", manualLogs);
+
+            const chartCanvas = document.getElementById('studyTimeChart');
+            if (!chartCanvas) {
+                console.error("Canvas element 'studyTimeChart' not found.");
+                return;
+            }
+            let ctx = chartCanvas.getContext('2d');
+            const filter = document.getElementById('timeChartFilter').value;
+            console.log("Selected filter:", filter);
+
+            // Aggregate data based on filter
+            const aggregatedData = {};
+
+            manualLogs.forEach(log => {
+                let key;
+                let displayLabel;
+                const logDate = new Date(log.date); // Assuming log.date is YYYY-MM-DD
+
+                if (isNaN(logDate.getTime())) {
+                    console.warn("Invalid date found in log:", log.date, "Skipping log.");
+                    return; // Skip logs with invalid dates
+                }
+
+                if (filter === 'day') {
+                    key = log.date;
+                    displayLabel = log.date;
+                } else if (filter === 'week') {
+                    key = getWeekStartDate(logDate);
+                    const weekEnd = new Date(key);
+                    weekEnd.setDate(weekEnd.getDate() + 6);
+                    displayLabel = `${key} to ${weekEnd.toISOString().split('T')[0]}`;
+                } else if (filter === 'month') {
+                    key = getMonthString(logDate);
+                    displayLabel = logDate.toLocaleString('default', { month: 'long', year: 'numeric' }).toUpperCase();
+                }
+
+                if (!aggregatedData[key]) {
+                    aggregatedData[key] = { totalMinutes: 0, displayLabel: displayLabel };
+                }
+                aggregatedData[key].totalMinutes += (log.totalMinutes || 0); // Ensure totalMinutes exists and is a number
+            });
+
+            console.log("Aggregated data before sorting:", aggregatedData);
+
+            // Sort keys (dates/weeks/months) to ensure chronological order
+            const sortedKeys = Object.keys(aggregatedData).sort();
+            console.log("Sorted keys:", sortedKeys);
+
+            const labels = sortedKeys.map(key => aggregatedData[key].displayLabel);
+            // Convert totalMinutes to hours for display on the chart
+            const data = sortedKeys.map(key => (aggregatedData[key].totalMinutes / 60).toFixed(2)); // Convert minutes to hours
+
+            console.log("Labels for time chart:", labels);
+            console.log("Data for time chart (hours):", data);
+
+            if (studyTimeChart) {
+                studyTimeChart.destroy();
+                console.log("Existing study time chart destroyed.");
+            }
+
+            const chartContainer = document.querySelector('#timeTrackerPage .chart-container');
+            // Ensure the canvas element is always present for the chart
+            if (!chartContainer.querySelector('canvas')) {
+                chartContainer.innerHTML = '<canvas id="studyTimeChart"></canvas>';
+                ctx = document.getElementById('studyTimeChart').getContext('2d');
+            }
+
+            if (labels.length === 0) {
+                chartContainer.innerHTML = '<p class="feature-placeholder" style="margin:0; padding:30px;">NO STUDY TIME LOGGED YET. START A TIMER OR ADD MANUAL LOGS!</p>';
+                return; // Exit if no data
+            }
+
+            studyTimeChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'STUDY HOURS',
+                        data: data,
+                        borderColor: '#00FF00', /* Lime Green */
+                        backgroundColor: 'rgba(0, 255, 0, 0.2)', /* Transparent Lime Green fill */
+                        tension: 0.4,
+                        fill: true,
+                        pointBackgroundColor: '#00FFFF', /* Electric Cyan for points */
+                        pointBorderColor: 'rgba(255, 255, 255, 0.6)',
+                        pointBorderWidth: 1.5,
+                        pointRadius: 6,
+                        pointHoverRadius: 9
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        title: {
+                            display: true,
+                            text: 'STUDY TIME OVERVIEW',
+                            font: {
+                                size: 20,
+                                weight: '600',
+                                family: "'Exo 2', sans-serif",
+                            },
+                            color: '#00FF00' /* Lime Green */
+                        },
+                        legend: {
+                            display: false
+                        }
+                    },
+                    scales: {
+                        x: {
+                            title: {
+                                display: true,
+                                text: filter.toUpperCase(),
+                                color: '#8A2BE2', /* Blue Violet */
+                                font: { family: "'Exo 2', sans-serif" }
+                            },
+                            ticks: {
+                                color: '#E0E0E0',
+                                font: { family: "'Exo 2', sans-serif" }
+                            },
+                            grid: {
+                                color: 'rgba(255, 255, 255, 0.1)',
+                                lineWidth: 1,
+                                borderDash: [5, 5]
+                            }
+                        },
+                        y: {
+                            title: {
+                                display: true,
+                                text: 'HOURS STUDIED',
+                                color: '#8A2BE2', /* Blue Violet */
+                                font: { family: "'Exo 2', sans-serif" }
+                            },
+                            min: 0,
+                            ticks: {
+                                color: '#E0E0E0',
+                                font: { family: "'Exo 2', sans-serif" }
+                            },
+                            grid: {
+                                color: 'rgba(255, 255, 255, 0.1)',
+                                lineWidth: 1,
+                                borderDash: [5, 5]
+                            }
+                        }
+                    }
+                }
+            });
+            console.log("New study time chart created.");
+        }
+        window.updateStudyTimeChart = updateStudyTimeChart; // Make globally accessible for onchange event
+
+        // --- Events Calendar Functions ---
+
+        /**
+         * Renders the calendar grid for the given date.
+         * @param {Date} date The date to render the calendar for.
+         */
+        function renderCalendar(date) {
+            const monthYearDisplay = document.getElementById('currentMonthYear');
+            const calendarBody = document.getElementById('calendarBody');
+            calendarBody.innerHTML = '';
+
+            const year = date.getFullYear();
+            const month = date.getMonth();
+            const firstDay = new Date(year, month, 1);
+            const lastDay = new Date(year, month + 1, 0);
+            const numDays = lastDay.getDate();
+            const startDayOfWeek = firstDay.getDay(); // 0 for Sunday, 6 for Saturday
+
+            monthYearDisplay.textContent = `${date.toLocaleString('default', { month: 'long' }).toUpperCase()} ${year}`;
+
+            let day = 1;
+            for (let i = 0; i < 6; i++) {
+                const row = document.createElement('tr');
+                for (let j = 0; j < 7; j++) {
+                    const cell = document.createElement('td');
+                    if (i === 0 && j < startDayOfWeek) {
+                        cell.textContent = '';
+                    } else if (day <= numDays) {
+                        const currentCellDate = new Date(year, month, day);
+                        cell.innerHTML = `<span class="calendar-day-number">${day}</span>`;
+                        cell.dataset.date = currentCellDate.toISOString().split('T')[0];
+
+                        const today = new Date();
+                        if (currentCellDate.toDateString() === today.toDateString()) {
+                            cell.classList.add('today');
+                        }
+
+                        if (currentCellDate.toDateString() === selectedCalendarDate.toDateString()) {
+                            cell.classList.add('selected-date');
+                        }
+
+                        const eventsOnThisDay = events.filter(event =>
+                            new Date(event.date).toDateString() === currentCellDate.toDateString()
+                        );
+                        if (eventsOnThisDay.length > 0) {
+                            cell.classList.add('has-event');
+                            const indicator = document.createElement('div');
+                            indicator.className = 'event-indicator';
+                            cell.appendChild(indicator);
+
+                            cell.addEventListener('mouseenter', (e) => showEventTooltip(e, eventsOnThisDay));
+                            cell.addEventListener('mouseleave', hideEventTooltip);
+                        }
+
+                        cell.addEventListener('click', () => {
+                            selectedCalendarDate = currentCellDate;
+                            renderCalendar(currentDate);
+                            renderEventsForSelectedDate(selectedCalendarDate);
+                        });
+                        day++;
+                    }
+                    row.appendChild(cell);
+                }
+                if (day > numDays && i > 0 && row.children[0].textContent === '') {
+                    break;
+                }
+                calendarBody.appendChild(row);
+            }
+        }
+
+        /**
+         * Shows the event tooltip on hover.
+         * @param {Event} e The mouse event.
+         * @param {Array} eventsOnDay Array of events for the day.
+         */
+        function showEventTooltip(e, eventsOnDay) {
+            const tooltip = document.getElementById('eventTooltip');
+            tooltip.innerHTML = '';
+            tooltip.classList.add('show');
+
+            if (eventsOnDay.length === 0) {
+                tooltip.style.display = 'none';
+                return;
+            }
+
+            tooltip.style.display = 'block';
+            
+            eventsOnDay.forEach(event => {
+                const eventDiv = document.createElement('div');
+                eventDiv.innerHTML = `
+                    <h5>${event.title}</h5>
+                    <p>${event.description || 'NO DESCRIPTION'}</p>
+                    <p><small>${event.date}</small></p>
+                `;
+                tooltip.appendChild(eventDiv);
+            });
+
+            const rect = e.target.getBoundingClientRect();
+            tooltip.style.left = `${rect.left + window.scrollX + rect.width / 2}px`;
+            tooltip.style.top = `${rect.top + window.scrollY - tooltip.offsetHeight - 10}px`;
+            tooltip.style.transform = 'translateX(-50%)';
+        }
+
+        /**
+         * Hides the event tooltip.
+         */
+        function hideEventTooltip() {
+            const tooltip = document.getElementById('eventTooltip');
+            tooltip.classList.remove('show');
+            tooltip.style.display = 'none';
+        }
+
+        /**
+         * Navigates to the previous month in the calendar.
+         */
+        function prevMonth() {
+            currentDate.setMonth(currentDate.getMonth() - 1);
+            renderCalendar(currentDate);
+        }
+        window.prevMonth = prevMonth; // Make globally accessible
+
+        /**
+         * Navigates to the next month in the calendar.
+         */
+        function nextMonth() {
+            currentDate.setMonth(currentDate.getMonth() + 1);
+            renderCalendar(currentDate);
+        }
+        window.nextMonth = nextMonth; // Make globally accessible
+
+        /**
+         * Adds a new event to Firestore.
+         */
+        async function addEvent() {
+            if (!userId) {
+                showModal("ACCESS DENIED: PLEASE LOG IN.");
+                return;
+            }
+            showLoading();
+            const title = document.getElementById('eventTitle').value.trim();
+            const description = document.getElementById('eventDescription').value.trim();
+            const date = document.getElementById('eventDate').value;
+
+            if (!title || !date) {
+                hideLoading();
+                showModal("INPUT ERROR: TITLE AND DATE ARE REQUIRED.");
+                return;
+            }
+
+            try {
+                const collectionPath = `artifacts/${appId}/users/${userId}/events`;
+                console.log(`Attempting to add event to: ${collectionPath}`);
+                const newEvent = {
+                    title,
+                    description,
+                    date,
+                    timestamp: new Date().toISOString()
+                };
+                await addDoc(collection(db, collectionPath), newEvent);
+                document.getElementById('eventTitle').value = '';
+                document.getElementById('eventDescription').value = '';
+                document.getElementById('eventDate').value = '';
+                hideLoading();
+                showModal("EVENT ADDED SUCCESSFULLY.", "success");
+            } catch (error) {
+                console.error(`Error adding event to artifacts/${appId}/users/${userId}/events:`, error);
+                hideLoading();
+                showModal("DATA ERROR: EVENT LOG FAILED. PLEASE RETRY.", "error");
+            }
+        }
+        window.addEvent = addEvent; // Make globally accessible
+
+        /**
+         * Deletes an event from Firestore.
+         * @param {string} id The ID of the event to delete.
+         */
+        async function deleteEvent(id) {
+            if (!userId) return;
+            showLoading();
+            try {
+                const docPath = `artifacts/${appId}/users/${userId}/events/${id}`;
+                console.log(`Attempting to delete event from: ${docPath}`);
+                await deleteDoc(doc(db, docPath));
+                hideLoading();
+                showModal("EVENT DELETED.", "info");
+            } catch (error) {
+                console.error(`Error deleting event from artifacts/${appId}/users/${userId}/events/${id}:`, error);
+                hideLoading();
+                showModal("ERROR: DELETION FAILED. PLEASE RETRY.", "error");
+            }
+        }
+        window.deleteEvent = deleteEvent; // Make globally accessible
+
+        /**
+         * Renders events for the currently selected date.
+         * @param {Date} date The date for which to render events.
+         */
+        function renderEventsForSelectedDate(date) {
+            const displayElement = document.getElementById('selectedDateDisplay');
+            const listContainer = document.getElementById('selectedDateEventsList');
+            listContainer.innerHTML = '';
+
+            displayElement.textContent = date.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }).toUpperCase();
+
+            const eventsOnSelectedDate = events.filter(event =>
+                new Date(event.date).toDateString() === date.toDateString()
+            );
+
+            if (eventsOnSelectedDate.length === 0) {
+                listContainer.innerHTML = '<p>NO EVENTS FOR THIS DATE.</p>';
+                return;
+            }
+
+            eventsOnSelectedDate.forEach(event => {
+                const item = document.createElement('div');
+                item.className = 'event-list-item';
+                item.innerHTML = `
+                    <span><span class="event-title">${event.title}</span>
+                        ${event.description ? `<br><small>${event.description}</small>` : ''}
+                    </span>
+                    <button class="delete-btn" onclick="deleteEvent('${event.id}')">DELETE</button>
+                `;
+                listContainer.appendChild(item);
+            });
+        }
+        window.renderEventsForSelectedDate = renderEventsForSelectedDate; // Make globally accessible
+
+        // --- Notes Functions ---
+
+        /**
+         * Opens the note form modal for adding a new note or editing an existing one.
+         * @param {string|null} noteId The ID of the note to edit, or null for a new note.
+         */
+        function openNoteFormModal(noteId = null) {
+            const formModal = document.getElementById('noteFormModal');
+            const titleInput = document.getElementById('noteTitleInput');
+            const contentInput = document.getElementById('noteContentInput');
+            const linkInput = document.getElementById('noteLinkInput');
+            const saveButton = document.getElementById('saveNoteFormBtn');
+            const modalTitle = document.getElementById('noteFormModalTitle');
+
+            // Reset form fields
+            titleInput.value = '';
+            contentInput.value = '';
+            linkInput.value = '';
+            editingNoteId = null; // Clear editing state
+
+            if (noteId) {
+                // Editing existing note
+                const note = notes.find(n => n.id === noteId);
+                if (note) {
+                    editingNoteId = noteId;
+                    modalTitle.textContent = 'EDIT NOTE';
+                    titleInput.value = note.title;
+                    contentInput.value = note.content;
+                    linkInput.value = note.link;
+                    saveButton.textContent = 'SAVE CHANGES';
+                } else {
+                    showModal("NOTE NOT FOUND.");
+                    return;
+                }
+            } else {
+                // Adding new note
+                modalTitle.textContent = 'CREATE NEW NOTE';
+                saveButton.textContent = 'ADD NOTE';
+            }
+            formModal.style.display = 'flex'; // Show the modal
+        }
+        window.openNoteFormModal = openNoteFormModal;
+
+        /**
+         * Closes the note form modal and resets the editing state.
+         */
+        function closeNoteFormModal() {
+            document.getElementById('noteFormModal').style.display = 'none';
+            editingNoteId = null; // Ensure editing state is reset
+            document.getElementById('noteTitleInput').value = '';
+            document.getElementById('noteContentInput').value = '';
+            document.getElementById('noteLinkInput').value = '';
+        }
+        window.closeNoteFormModal = closeNoteFormModal;
+
+
+        /**
+         * Adds a new note or updates an existing one in Firestore.
+         */
+        async function addOrUpdateNote() {
+            if (!userId) {
+                showModal("ACCESS DENIED: PLEASE LOG IN.");
+                return;
+            }
+            showLoading();
+            const title = document.getElementById('noteTitleInput').value.trim();
+            const content = document.getElementById('noteContentInput').value.trim();
+            let link = document.getElementById('noteLinkInput').value.trim();
+
+            if (!title && !content && !link) {
+                hideLoading();
+                showModal("INPUT ERROR: TITLE, CONTENT, OR LINK IS REQUIRED.");
+                return;
+            }
+
+            // Ensure link starts with http:// or https:// if provided
+            if (link && !link.startsWith('http://') && !link.startsWith('https://')) {
+                link = `https://${link}`;
+            }
+
+            try {
+                const collectionPath = `artifacts/${appId}/users/${userId}/notes`;
+                const noteData = {
+                    title: title || 'UNTITLED NOTE',
+                    content: content || '',
+                    link: link || '',
+                    timestamp: new Date().toISOString()
+                };
+
+                if (editingNoteId) {
+                    // Update existing note
+                    const noteDocRef = doc(db, collectionPath, editingNoteId);
+                    console.log(`Attempting to update note at: ${noteDocRef.path}`);
+                    await updateDoc(noteDocRef, noteData);
+                    showModal("NOTE UPDATED SUCCESSFULLY.", "success");
+                } else {
+                    // Add new note
+                    console.log(`Attempting to add note to: ${collectionPath}`);
+                    await addDoc(collection(db, collectionPath), noteData);
+                    showModal("NOTE ADDED SUCCESSFULLY.", "success");
+                }
+                
+                closeNoteFormModal(); // Close the form modal after saving
+                hideLoading();
+            } catch (error) {
+                console.error(`Error adding/updating note:`, error);
+                hideLoading();
+                showModal("DATA ERROR: NOTE SAVE FAILED. PLEASE RETRY.", "error");
+            }
+        }
+        window.addOrUpdateNote = addOrUpdateNote; // Make globally accessible
+
+        /**
+         * Deletes a note from Firestore.
+         * Can be called from the list or the view modal.
+         * @param {string} id The ID of the note to delete.
+         */
+        async function deleteNote(id) {
+            if (!userId) return;
+            showLoading();
+            try {
+                const docPath = `artifacts/${appId}/users/${userId}/notes/${id}`;
+                console.log(`Attempting to delete note from: ${docPath}`);
+                await deleteDoc(doc(db, docPath));
+                hideLoading();
+                showModal("NOTE DELETED.", "info");
+                hideViewNoteModal(); // Hide modal if open
+            } catch (error) {
+                console.error(`Error deleting note from artifacts/${appId}/users/${userId}/notes/${id}:`, error);
+                hideLoading();
+                showModal("ERROR: DELETION FAILED. PLEASE RETRY.", "error");
+            }
+        }
+        window.deleteNote = deleteNote; // Make globally accessible
+
+        /**
+         * Renders the list of notes. Each item is clickable to open a detailed view.
+         */
+        function renderNotes() {
+            const listContainer = document.getElementById('noteList');
+            listContainer.innerHTML = '';
+
+            if (notes.length === 0) {
+                listContainer.innerHTML = '<p class="feature-placeholder">NO NOTES IN YOUR DATABASE.</p>';
+                return;
+            }
+
+            notes.forEach(note => {
+                const item = document.createElement('div');
+                item.className = 'note-list-item-card'; // New class for card style
+                
+                // Add direct click listener to the card
+                item.addEventListener('click', () => openViewNoteModal(note.id));
+
+                // Determine icon based on link presence
+                const iconSvg = note.link ? `
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="note-card-icon">
+                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/>
+                    </svg>
+                    ` : `
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="note-card-icon">
+                        <path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm-2 16H9v-2h3v2zm3-4H9v-2h6v2zm0-4H9V8h6v2z"/>
+                    </svg>
+                `;
+
+                const dateCreated = note.timestamp ? new Date(note.timestamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }).toUpperCase() : 'N/A';
+
+                item.innerHTML = `
+                    <div class="note-card-header">
+                        ${iconSvg}
+                        <div class="note-card-title">${note.title}</div>
+                        <div class="note-card-menu">
+                            <button class="note-card-menu-btn" onclick="event.stopPropagation(); toggleNoteCardMenu(this)">
+                                &#x22EE; <!-- Vertical ellipsis -->
+                            </button>
+                            <div class="note-card-dropdown-content">
+                                <a href="#" onclick="event.stopPropagation(); hideNoteCardMenu(this); openViewNoteModal('${note.id}')">VIEW</a>
+                                <a href="#" onclick="event.stopPropagation(); hideNoteCardMenu(this); openNoteFormModal('${note.id}')">EDIT</a>
+                                <a href="#" onclick="event.stopPropagation(); hideNoteCardMenu(this); deleteNote('${note.id}')">DELETE</a>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="note-card-footer">
+                        <span class="note-card-date">CREATED: ${dateCreated}</span>
+                    </div>
+                `;
+                listContainer.appendChild(item);
+            });
+        }
+        window.renderNotes = renderNotes; // Make globally accessible
+
+        /**
+         * Toggles the visibility of the note card dropdown menu.
+         * @param {HTMLElement} button The button that was clicked.
+         */
+        function toggleNoteCardMenu(button) {
+            const dropdown = button.nextElementSibling;
+            // Close any other open dropdowns
+            document.querySelectorAll('.note-card-dropdown-content').forEach(d => {
+                if (d !== dropdown) {
+                    d.classList.remove('show');
+                }
+            });
+            dropdown.classList.toggle('show');
+        }
+        window.toggleNoteCardMenu = toggleNoteCardMenu;
+
+        /**
+         * Hides a specific note card dropdown menu.
+         * @param {HTMLElement} element An element within the dropdown, or the button itself.
+         */
+        function hideNoteCardMenu(element) {
+            let current = element;
+            while (current && !current.classList.contains('note-card-dropdown-content')) {
+                current = current.parentElement;
+            }
+            if (current) {
+                current.classList.remove('show');
+            }
+        }
+        window.hideNoteCardMenu = hideNoteCardMenu; // Make globally accessible
+
+        // Close dropdowns when clicking outside
+        document.addEventListener('click', (event) => {
+            if (!event.target.matches('.note-card-menu-btn')) {
+                document.querySelectorAll('.note-card-dropdown-content').forEach(dropdown => {
+                    dropdown.classList.remove('show');
+                });
+            }
+        });
+
+
+        /**
+         * Opens the modal to view a specific note's details.
+         * @param {string} noteId The ID of the note to view.
+         */
+        function openViewNoteModal(noteId) {
+            const note = notes.find(n => n.id === noteId);
+            if (!note) {
+                showModal("NOTE NOT FOUND.");
+                return;
+            }
+
+            document.getElementById('viewNoteTitle').textContent = note.title;
+            document.getElementById('viewNoteContent').textContent = note.content;
+            const viewNoteLink = document.getElementById('viewNoteLink');
+            if (note.link) {
+                viewNoteLink.href = note.link;
+                viewNoteLink.textContent = note.link;
+                viewNoteLink.style.display = 'inline';
+            } else {
+                viewNoteLink.href = '#';
+                viewNoteLink.textContent = '';
+                viewNoteLink.style.display = 'none';
+            }
+
+            // Set up buttons in the view modal
+            document.getElementById('editNoteFromViewBtn').onclick = () => {
+                hideViewNoteModal();
+                openNoteFormModal(noteId); // Now calls the new form modal
+            };
+            document.getElementById('deleteNoteFromViewBtn').onclick = () => {
+                hideViewNoteModal(); // Hide view modal before showing confirmation (or just delete directly)
+                deleteNote(noteId);
+            };
+
+            document.getElementById('viewNoteModal').style.display = 'block';
+        }
+        window.openViewNoteModal = openViewNoteModal;
+
+        /**
+         * Hides the note view modal.
+         */
+        function hideViewNoteModal() {
+            document.getElementById('viewNoteModal').style.display = 'none';
+        }
+        window.hideViewNoteModal = hideViewNoteModal;
+
+        // --- Notification Functions ---
+
+        /**
+         * Requests permission for desktop notifications.
+         */
+        async function requestNotificationPermission() {
+            if (!("Notification" in window)) {
+                console.log("NOTIFICATIONS ARE NOT SUPPORTED BY THIS BROWSER.");
+                return;
+            }
+
+            if (Notification.permission === "granted") {
+                console.log("NOTIFICATION PERMISSION: GRANTED.");
+                return;
+            }
+
+            if (Notification.permission !== "denied") {
+                console.log("REQUESTING NOTIFICATION PERMISSION...");
+                const permission = await Notification.requestPermission();
+                if (permission === "granted") {
+                    console.log("NOTIFICATION PERMISSION: GRANTED.");
+                } else {
+                    console.warn("NOTIFICATION PERMISSION: DENIED.");
+                }
+            } else {
+                console.warn("NOTIFICATION PERMISSION: DENIED (USER REJECTION).");
+            }
+        }
+
+        /**
+         * Finds the nearest upcoming deadline.
+         * @returns {Object|null} The nearest deadline object or null if none found.
+         */
+        function getNearestDeadline() {
+            const now = new Date();
+            let nearest = null;
+            let minDiff = Infinity;
+
+            deadlines.forEach(deadline => {
+                const deadlineDate = new Date(deadline.date);
+                // Only consider future deadlines
+                if (deadlineDate > now) {
+                    const diff = deadlineDate.getTime() - now.getTime();
+                    if (diff < minDiff) {
+                        minDiff = diff;
+                        nearest = deadline;
+                    }
+                }
+            });
+            console.log("Nearest deadline detected:", nearest);
+            return nearest;
+        }
+
+        /**
+         * Notifies the user about the nearest deadline.
+         */
+        function notifyNearestDeadline() {
+            console.log("INITIATING DEADLINE NOTIFICATION PROTOCOL...");
+            if (userId && Notification.permission === "granted") {
+                const nearestDeadline = getNearestDeadline();
+                if (nearestDeadline) {
+                    const deadlineDate = new Date(nearestDeadline.date);
+                    const now = new Date();
+                    const diffMs = deadlineDate.getTime() - now.getTime();
+                    const diffHours = Math.ceil(diffMs / (1000 * 60 * 60));
+                    console.log("Time remaining (hours):", diffHours);
+
+                    let message;
+                    if (diffHours <= 24 && diffHours > 0) {
+                        message = `UPCOMING DEADLINE: "${nearestDeadline.title}" IS DUE IN APPROXIMATELY ${diffHours} HOURS.`;
+                    } else if (diffHours <= 0 && deadlineDate.toDateString() === now.toDateString()) {
+                        message = `CRITICAL DEADLINE: "${nearestDeadline.title}" IS DUE TODAY.`;
+                    } else {
+                        console.log("DEADLINE OUT OF RANGE FOR IMMEDIATE NOTIFICATION.");
+                        return;
+                    }
+
+                    new Notification("STUDY TRACKER PRO: DEADLINE ALERT", {
+                        body: message,
+                        icon: 'https://placehold.co/100x100/8A2BE2/FFFFFF?text=DL' // Blue Violet icon
+                    });
+                    showModal(`NOTIFICATION: ${message}`);
+                    console.log("NOTIFICATION TRANSMITTED:", message);
+                } else {
+                    console.log("NO UPCOMING DEADLINES DETECTED.");
+                }
+            } else if (userId && Notification.permission === "denied") {
+                console.warn("NOTIFICATION PERMISSION DENIED. CANNOT TRANSMIT DEADLINE ALERTS.");
+            } else {
+                console.log("USER UNAUTHORIZED OR NOTIFICATIONS DISABLED.");
+            }
+        }
+
+        /**
+         * Schedules the deadline notification to run every 2 hours.
+         */
+        function scheduleDeadlineNotifications() {
+            // Clear any existing interval to prevent duplicates if called multiple times
+            if (window.deadlineNotificationInterval) {
+                clearInterval(window.deadlineNotificationInterval);
+                window.deadlineNotificationInterval = null;
+                console.log("PREVIOUS NOTIFICATION PROTOCOL TERMINATED.");
+            }
+            // Set up the interval to run every 2 hours
+            window.deadlineNotificationInterval = setInterval(notifyNearestDeadline, 2 * 60 * 60 * 1000); // Every 2 hours
+            console.log("DEADLINE NOTIFICATION PROTOCOL INITIATED. INTERVAL: 2 HOURS.");
+        }
+
+
+        // --- Initial Setup and Event Listeners ---
+        document.addEventListener('DOMContentLoaded', async () => {
+            showLoading();
+            try {
+                // Initialize Firebase with the provided config
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                // Request notification permission early
+                await requestNotificationPermission();
+
+                // Authenticate user
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        console.log(`User authenticated. UID: ${userId}`);
+                        
+                        // Fetch the username associated with this UID
+                        const userProfilePath = `artifacts/${appId}/users/${userId}/profile/userDoc`;
+                        const userProfileRef = doc(db, userProfilePath);
+                        console.log(`Fetching user profile for existing session from: ${userProfilePath}`);
+                        const userProfileSnap = await getDoc(userProfileRef);
+
+                        if (userProfileSnap.exists()) {
+                            loggedInUsername = userProfileSnap.data().username;
+                            hasDeadlinesLoadedInitial = false; // Reset flag for new session
+                            setupFirestoreListeners();
+                            showPage('dashboardPage');
+                            // scheduleDeadlineNotifications() is now called within the deadlines onSnapshot listener
+                        } else {
+                            console.warn("AUTHENTICATED USER HAS NO PROFILE DOCUMENT. REDIRECTING TO WELCOME.");
+                            loggedInUsername = null;
+                            userId = null;
+                            showPage('welcomePage');
+                        }
+                    } else {
+                        console.log("NO USER SIGNED IN. REDIRECTING TO WELCOME PAGE.");
+                        loggedInUsername = null;
+                        userId = null;
+                        showPage('welcomePage');
+                    }
+                    hideLoading();
+                });
+
+                // Attach form submission listeners
+                document.getElementById('signupForm').addEventListener('submit', handleSignup);
+                document.getElementById('loginForm').addEventListener('submit', handleLogin);
+
+                // Event listeners for timer controls
+                document.getElementById('startTimerBtn').addEventListener('click', startTimer);
+                document.getElementById('pauseTimerBtn').addEventListener('click', pauseTimer);
+                document.getElementById('resetTimerBtn').addEventListener('click', resetTimer);
+                document.getElementById('logTimerSessionBtn').addEventListener('click', logTimerSession); // New listener for logging Pomodoro
+
+                // Initial display for timer
+                updateTimerDisplay();
+                // Initial display for study time chart (will be called by listener too)
+                // updateStudyTimeChart(); // This will be called by the Firestore listener for manualLogs
+
+            } catch (error) {
+                console.error("SYSTEM ERROR: FIREBASE INITIALIZATION FAILED:", error);
+                hideLoading();
+                showModal(`CRITICAL ERROR: APPLICATION STARTUP FAILED: ${error.message}. PLEASE CHECK NETWORK CONNECTION.`, "error");
+            }
+        });
+    </script>
+    <style>
+        /* Import 'Exo 2' font */
+        @import url('https://fonts.googleapis.com/css2?family=Exo+2:wght@300;400;500;600;700&display=swap');
+
+        /* Global Reset */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Exo 2', sans-serif; /* Primary font for all text */
+        }
+
+        /* Body Styling - Dark blue background with subtle gradients and particle effect */
+        body {
+            background-color: #0C0C2C; /* Very dark blue */
+            /* Subtle radial gradients for light sources */
+            background-image: radial-gradient(circle at top left, rgba(0, 255, 255, 0.1) 0%, transparent 40%),
+                              radial-gradient(circle at bottom right, rgba(138, 43, 226, 0.1) 0%, transparent 40%);
+            /* Subtle dot pattern for stars/particles */
+            background-image: url("data:image/svg+xml,%3Csvg width='6' height='6' viewBox='0 0 6 6' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='%23ffffff' fill-opacity='0.08' fill-rule='evenodd'%3E%3Ccircle cx='3' cy='3' r='0.5'/%3E%3C/g%3E%3C/svg%3E"),
+                              radial-gradient(circle at top left, rgba(0, 255, 255, 0.1) 0%, transparent 40%),
+                              radial-gradient(circle at bottom right, rgba(138, 43, 226, 0.1) 0%, transparent 40%);
+            background-size: 6px 6px, 100% 100%, 100% 100%; /* Size for the dot pattern, and full size for gradients */
+            background-repeat: repeat, no-repeat, no-repeat;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: #E0E0E0; /* Soft white for general text */
+            overflow-x: hidden;
+            position: relative;
+        }
+
+        /* Container Styling - Dark with bright neon border and shadow */
+        .container {
+            background: #1A1A3A; /* Slightly lighter dark blue */
+            border: 2px solid #00FFFF; /* Electric Cyan border */
+            box-shadow: 0 0 30px rgba(0, 255, 255, 0.6); /* Electric Cyan glow */
+            padding: 45px;
+            max-width: 1000px;
+            width: 95%;
+            text-align: center;
+            animation: fadeIn 1s ease-out;
+            position: relative;
+            overflow: hidden;
+            border-radius: 8px;
+            backdrop-filter: blur(5px);
+            transition: transform 0.3s ease;
+        }
+
+        /* Page Styling */
+        .page {
+            display: none;
+            animation: slideInFromTop 0.7s ease-out forwards;
+        }
+
+        .page.active {
+            display: block;
+        }
+
+        /* Page Slide-in Animation */
+        @keyframes slideInFromTop {
+            from { opacity: 0; transform: translateY(-30px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Heading 1 Styling */
+        h1 {
+            color: #8A2BE2; /* Blue Violet */
+            margin-bottom: 35px;
+            font-size: 3.5em;
+            font-weight: 700;
+            letter-spacing: 2px;
+            text-shadow: 0 0 15px rgba(138, 43, 226, 0.8); /* Intense glow */
+            text-transform: uppercase;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        /* Heading 2 Styling */
+        h2 {
+            color: #00FFFF; /* Electric Cyan */
+            margin-bottom: 30px;
+            font-size: 2.5em;
+            font-weight: 600;
+            letter-spacing: 1.5px;
+            text-shadow: 0 0 12px rgba(0, 255, 255, 0.7); /* Intense cyan glow */
+            text-transform: uppercase;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        /* Button Styling - Dark with vibrant neon border */
+        .btn {
+            background: #2A2A4A; /* Darker blue-purple */
+            color: #00FFFF; /* Electric Cyan text */
+            border: 2px solid #00FFFF; /* Electric Cyan border */
+            padding: 18px 32px;
+            border-radius: 6px;
+            font-size: 18px;
+            cursor: pointer;
+            margin: 12px;
+            transition: all 0.2s ease-in-out;
+            box-shadow: 0 0 15px rgba(0, 255, 255, 0.5); /* Cyan glow */
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            position: relative;
+            overflow: hidden;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        /* Button Hover Effects - More intense neon glow */
+        .btn:hover {
+            background: #3A3A5A; /* Slightly lighter dark */
+            color: #8A2BE2; /* Blue Violet text on hover */
+            box-shadow: 0 0 25px rgba(138, 43, 226, 0.7); /* Intense glow */
+            transform: translateY(-3px);
+            border-color: #8A2BE2;
+        }
+
+        /* Button Active (Click) Effect */
+        .btn:active {
+            transform: translateY(0);
+            box-shadow: 0 0 10px rgba(0, 255, 255, 0.4);
+        }
+
+        /* Form Group Styling */
+        .form-group {
+            margin-bottom: 22px;
+            text-align: left;
+        }
+
+        /* Label Styling */
+        label {
+            display: block;
+            margin-bottom: 10px;
+            color: #00FF00; /* Lime Green for labels */
+            font-weight: 500;
+            font-size: 1.1em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        /* Input, Textarea, Select Styling - Dark with neon border */
+        input, textarea, select {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #404060; /* Darker blue-purple border */
+            background-color: #1A1A3A; /* Dark blue-purple background */
+            color: #E0E0E0; /* Soft white text */
+            font-size: 1.1em;
+            transition: all 0.3s ease-in-out;
+            border-radius: 4px;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        /* Input, Textarea, Select Focus Effects */
+        input:focus, textarea:focus, select:focus {
+            outline: none;
+            border-color: #8A2BE2; /* Blue Violet border on focus */
+            box-shadow: 0 0 18px rgba(138, 43, 226, 0.7); /* Intense glow */
+            background-color: #2A2A4A;
+            color: #FFFFFF;
+        }
+
+        /* Textarea Specific Styling */
+        textarea {
+            resize: vertical;
+            min-height: 120px;
+        }
+
+        /* Dashboard Grid Layout */
+        .dashboard {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 35px;
+            margin-top: 40px;
+        }
+
+        /* Dashboard Item Styling - Dark cards with intense neon accents */
+        .dashboard-item {
+            background: #1A1A3A; /* Dark blue-purple background */
+            color: #E0E0E0; /* Soft white text */
+            padding: 35px;
+            border: 2px solid rgba(0, 255, 255, 0.2); /* Subtle cyan border */
+            cursor: pointer;
+            transition: all 0.2s ease-in-out;
+            box-shadow: 0 0 15px rgba(0, 255, 255, 0.3); /* Subtle cyan glow */
+            text-align: center;
+            font-weight: 500;
+            position: relative;
+            overflow: hidden;
+            border-radius: 6px;
+            text-transform: uppercase;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        /* Dashboard Item Hover Effects - More intense neon glow */
+        .dashboard-item:hover {
+            transform: translateY(-8px);
+            box-shadow: 0 0 40px rgba(138, 43, 226, 0.8); /* Intense glow */
+            background: #2A2A4A;
+            border-color: #8A2BE2; /* Blue Violet on hover */
+            color: #FFFFFF;
+        }
+
+        /* Individual Dashboard Item Accent Colors (bright neon borders/text color) */
+        .dashboard-item:nth-child(1) { /* Profile */
+            border-color: rgba(138, 43, 226, 0.3); /* Blue Violet */
+        }
+        .dashboard-item:nth-child(1):hover {
+            box-shadow: 0 0 40px rgba(138, 43, 226, 0.8);
+        }
+
+        .dashboard-item:nth-child(2) { /* Progress */
+            border-color: rgba(0, 255, 255, 0.3); /* Electric Cyan */
+        }
+        .dashboard-item:nth-child(2):hover {
+            box-shadow: 0 0 40px rgba(0, 255, 255, 0.8);
+        }
+
+        .dashboard-item:nth-child(3) { /* Achievements */
+            border-color: rgba(0, 255, 0, 0.3); /* Lime Green */
+        }
+        .dashboard-item:nth-child(3):hover {
+            box-shadow: 0 0 40px rgba(0, 255, 0, 0.8);
+        }
+
+        .dashboard-item:nth-child(4) { /* Deadlines */
+            border-color: rgba(255, 165, 0, 0.3); /* Bright Orange */
+        }
+        .dashboard-item:nth-child(4):hover {
+            box-shadow: 0 0 40px rgba(255, 165, 0, 0.8);
+        }
+
+        .dashboard-item:nth-child(5) { /* To-Do */
+            border-color: rgba(138, 43, 226, 0.3); /* Blue Violet */
+        }
+        .dashboard-item:nth-child(5):hover {
+            box-shadow: 0 0 40px rgba(138, 43, 226, 0.8);
+        }
+
+        .dashboard-item:nth-child(6) { /* Time Tracker */
+            border-color: rgba(0, 255, 255, 0.3); /* Electric Cyan */
+        }
+        .dashboard-item:nth-child(6):hover {
+            box-shadow: 0 0 40px rgba(0, 255, 255, 0.8);
+        }
+
+        .dashboard-item:nth-child(7) { /* Events */
+            border-color: rgba(0, 255, 0, 0.3); /* Lime Green */
+        }
+        .dashboard-item:nth-child(7):hover {
+            box-shadow: 0 0 40px rgba(0, 255, 0, 0.8);
+        }
+
+        .dashboard-item:nth-child(8) { /* Notes */
+            border-color: rgba(255, 165, 0, 0.3); /* Bright Orange */
+        }
+        .dashboard-item:nth-child(8):hover {
+            box-shadow: 0 0 40px rgba(255, 165, 0, 0.8);
+        }
+
+        /* Back Button Specific Styling */
+        .back-btn {
+            background: #1A1A3A;
+            color: #E0E0E0;
+            border-color: #404060;
+            box-shadow: 0 0 10px rgba(255, 255, 255, 0.2);
+        }
+        .back-btn:hover {
+            background: #2A2A4A;
+            color: #00FF00; /* Lime Green on hover */
+            transform: translateY(-2px);
+            box-shadow: 0 0 20px rgba(0, 255, 0, 0.5);
+            border-color: #00FF00;
+        }
+
+        /* Welcome Text Styling */
+        .welcome-text {
+            color: #E0E0E0;
+            margin-bottom: 30px;
+            font-size: 1.2em;
+            line-height: 1.8;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        /* Success Message Styling */
+        .success-message {
+            background-color: rgba(0, 255, 0, 0.15); /* Transparent Lime Green */
+            color: #00FF00; /* Lime Green */
+            padding: 18px;
+            border: 2px solid #00FF00;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            box-shadow: 0 0 20px rgba(0, 255, 0, 0.6);
+            border-radius: 6px;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        /* Loading Overlay Styling */
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.95); /* More opaque background */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            backdrop-filter: blur(10px);
+        }
+
+        /* Loading Spinner Container */
+        .loading-spinner {
+            background-color: #1A1A3A;
+            padding: 40px;
+            border: 2px solid #8A2BE2; /* Blue Violet border */
+            text-align: center;
+            box-shadow: 0 0 30px rgba(138, 43, 226, 0.8); /* Intense glow */
+            color: #E0E0E0;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            border-radius: 8px;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        /* Actual Spinner Animation */
+        .spinner {
+            width: 60px;
+            height: 60px;
+            border: 6px solid rgba(255, 255, 255, 0.1);
+            border-top: 6px solid #8A2BE2; /* Blue Violet */
+            border-right: 6px solid #00FFFF; /* Electric Cyan */
+            border-bottom: 6px solid #00FF00; /* Lime Green */
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+            margin: 0 auto 30px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        /* Disabled Button Styling */
+        .btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            transform: none !important;
+            box-shadow: none !important;
+            background: #0A0A2A !important;
+            color: #404060 !important;
+            border-color: #2A2A4A !important;
+        }
+
+        /* User Info Box Styling */
+        .user-info {
+            background-color: #1A1A3A;
+            padding: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            margin-bottom: 25px;
+            text-align: left;
+            color: #E0E0E0;
+            font-size: 1em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            border-radius: 6px;
+            box-shadow: 0 0 10px rgba(0, 255, 255, 0.3);
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        /* Feature Placeholder Styling */
+        .feature-placeholder {
+            background-color: #2A2A4A;
+            padding: 30px;
+            border: 2px dashed #00FFFF; /* Electric Cyan dashed border */
+            margin-top: 30px;
+            text-align: center;
+            color: #00FFFF; /* Electric Cyan */
+            font-size: 1.1em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            border-radius: 6px;
+            box-shadow: 0 0 15px rgba(0, 255, 255, 0.5);
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        /* SVG Icon Styling */
+        .dashboard-item svg {
+            width: 50px;
+            height: 50px;
+            margin-bottom: 18px;
+            color: #8A2BE2; /* Blue Violet for icons */
+            transition: color 0.2s ease-in-out;
+            filter: drop-shadow(0 0 10px rgba(138, 43, 226, 0.6)); /* Intense glow */
+        }
+        .dashboard-item:hover svg {
+            color: #00FF00; /* Lime Green on hover */
+            filter: drop-shadow(0 0 15px rgba(0, 255, 0, 0.8)); /* Intense lime green glow */
+        }
+
+        /* Manual timer inputs */
+        .time-input-group {
+            display: flex;
+            justify-content: center;
+            gap: 25px;
+            margin-bottom: 30px;
+        }
+
+        .time-input-group input {
+            width: 110px;
+            text-align: center;
+        }
+
+        .log-message {
+            margin-top: 20px;
+            font-weight: 500;
+            color: #00FF00; /* Lime Green */
+            font-size: 1.1em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        /* Custom modal message */
+        .modal-message {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background-color: #1A1A3A;
+            padding: 35px 45px;
+            border: 2px solid #8A2BE2; /* Blue Violet */
+            box-shadow: 0 0 25px rgba(138, 43, 226, 0.7);
+            z-index: 1001;
+            animation: fadeIn 0.3s ease-out;
+            max-width: 450px;
+            width: 90%;
+            text-align: center;
+            color: #E0E0E0;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            border-radius: 8px;
+            display: none; /* Controlled by JS */
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        .modal-message p {
+            margin-bottom: 25px;
+            font-size: 1.1em;
+            color: #00FFFF; /* Electric Cyan */
+        }
+
+        .modal-message .modal-close-btn {
+            background: #2A2A4A;
+            color: #00FFFF;
+            border: 2px solid #00FFFF;
+            padding: 14px 28px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s ease-in-out;
+            font-weight: 600;
+            text-transform: uppercase;
+            box-shadow: 0 0 10px rgba(0, 255, 255, 0.4);
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        .modal-message .modal-close-btn:hover {
+            background: #3A3A5A;
+            color: #8A2BE2;
+            box-shadow: 0 0 20px rgba(138, 43, 226, 0.6);
+        }
+
+        /* Sections */
+        .progress-section, .achievements-section, .deadlines-section, .todo-section, .time-tracker-section, .events-section, .profile-section, .notes-section {
+            display: flex;
+            flex-direction: column;
+            gap: 30px;
+        }
+
+        .score-input-group, .achievement-input-group, .deadline-input-group, .todo-input-group, .event-input-group {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            margin-bottom: 30px;
+            align-items: center;
+        }
+
+        .score-input-group div, .achievement-input-group div, .deadline-input-group div, .todo-input-group div, .event-input-group div {
+            width: 100%;
+            text-align: left;
+        }
+
+        /* Chart Container */
+        .chart-container {
+            width: 100%;
+            max-width: 850px;
+            margin: 0 auto;
+            background-color: #1A1A3A;
+            padding: 35px;
+            border: 2px solid #00FFFF;
+            box-shadow: 0 0 25px rgba(0, 255, 255, 0.6);
+            min-height: 500px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 8px;
+        }
+
+        .score-list-container, .achievement-list-container, .deadline-list-container, .todo-list-container, .event-list-container, .manual-log-list-container {
+            margin-top: 30px;
+            text-align: left;
+            max-height: 400px;
+            overflow-y: auto;
+            padding-right: 15px;
+            scrollbar-width: thin;
+            scrollbar-color: #8A2BE2 #2A2A4A; /* Blue Violet thumb, dark track */
+        }
+
+        /* Webkit scrollbar (Chrome, Safari) */
+        .score-list-container::-webkit-scrollbar,
+        .achievement-list-container::-webkit-scrollbar,
+        .deadline-list-container::-webkit-scrollbar,
+        .todo-list-container::-webkit-scrollbar,
+        .event-list-container::-webkit-scrollbar,
+        .manual-log-list-container::-webkit-scrollbar,
+        .view-note-content p::-webkit-scrollbar {
+            width: 12px;
+        }
+
+        .score-list-container::-webkit-scrollbar-track,
+        .achievement-list-container::-webkit-scrollbar-track,
+        .deadline-list-container::-webkit-scrollbar-track,
+        .todo-list-container::-webkit-scrollbar-track,
+        .event-list-container::-webkit-scrollbar-track,
+        .manual-log-list-container::-webkit-scrollbar-track,
+        .view-note-content p::-webkit-scrollbar-track {
+            background: #2A2A4A; /* Dark track */
+            border-radius: 6px;
+        }
+
+        .score-list-container::-webkit-scrollbar-thumb,
+        .achievement-list-container::-webkit-scrollbar-thumb,
+        .deadline-list-container::-webkit-scrollbar-thumb,
+        .todo-list-container::-webkit-scrollbar-thumb,
+        .event-list-container::-webkit-scrollbar-thumb,
+        .manual-log-list-container::-webkit-scrollbar-thumb,
+        .view-note-content p::-webkit-scrollbar-thumb {
+            background-color: #8A2BE2; /* Blue Violet thumb */
+            border-radius: 6px;
+            border: 2px solid #00FFFF; /* Electric Cyan border on thumb */
+            box-shadow: 0 0 10px rgba(138, 43, 226, 0.6);
+        }
+
+
+        .score-list-item, .achievement-list-item, .deadline-list-item, .todo-list-item, .event-list-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 18px 25px;
+            background-color: #2A2A4A; /* Darker blue-purple for list items */
+            border: 1px solid rgba(255, 255, 255, 0.15); /* Subtle border */
+            margin-bottom: 15px;
+            font-size: 1em;
+            color: #E0E0E0;
+            box-shadow: 0 0 10px rgba(0, 255, 255, 0.3);
+            border-radius: 6px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            font-family: 'Exo 2', sans-serif;
+            transition: all 0.2s ease-in-out;
+        }
+
+        .score-list-item:hover, .achievement-list-item:hover, .deadline-list-item:hover, .todo-list-item:hover, .event-list-item:hover {
+            background-color: #3A3A5A;
+            border-color: #8A2BE2; /* Blue Violet */
+            box-shadow: 0 0 20px rgba(138, 43, 226, 0.6);
+            transform: translateX(8px);
+        }
+
+        .score-list-item:last-child, .achievement-list-item:last-child, .deadline-list-item:last-child, .todo-list-item:last-child, .event-list-item:last-child {
+            margin-bottom: 0;
+        }
+
+        .delete-btn, .complete-btn {
+            background: #4A1A1A; /* Dark red background */
+            color: #FF0000; /* Bright Red text */
+            border: 2px solid #FF0000;
+            padding: 12px 22px;
+            border-radius: 5px;
+            font-size: 0.9em;
+            cursor: pointer;
+            transition: all 0.2s ease-in-out;
+            margin-left: 15px;
+            box-shadow: 0 0 10px rgba(255, 0, 0, 0.5);
+            font-weight: 600;
+            text-transform: uppercase;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        .delete-btn:hover, .complete-btn:hover {
+            background: #5A1A1A;
+            color: #00FF00; /* Lime Green on hover */
+            transform: scale(1.08);
+            box-shadow: 0 0 20px rgba(0, 255, 0, 0.7);
+            border-color: #00FF00;
+        }
+
+        .complete-btn {
+            background: #1A4A1A; /* Dark green background */
+            color: #00FF00; /* Lime Green text */
+            border-color: #00FF00;
+            box-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
+        }
+        .complete-btn:hover {
+            background: #2A5A2A;
+            color: #8A2BE2; /* Blue Violet on hover */
+            box-shadow: 0 0 20px rgba(138, 43, 226, 0.7);
+            border-color: #8A2BE2;
+        }
+
+        .todo-list-item.completed, .event-list-item.completed {
+            text-decoration: line-through;
+            opacity: 0.6;
+            background-color: #1A1A3A;
+            border-color: #404060;
+            color: #808090;
+        }
+
+        .timer-display {
+            font-size: 5em;
+            font-weight: 700;
+            margin-bottom: 30px;
+            color: #00FFFF; /* Electric Cyan */
+            text-shadow: 0 0 20px rgba(0, 255, 255, 0.8);
+            letter-spacing: 3px;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        .timer-controls button {
+            margin: 0 15px;
+        }
+
+        /* Chart Controls (for time tracker chart) */
+        .chart-controls {
+            margin-top: 30px;
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .chart-controls label {
+            margin-bottom: 0;
+            color: #00FFFF; /* Electric Cyan */
+            font-size: 1.1em;
+            font-weight: 600;
+            letter-spacing: 1px;
+        }
+
+        .chart-controls select {
+            width: auto;
+            padding: 10px 15px;
+            font-size: 1em;
+            background-color: #2A2A4A;
+            border: 2px solid #8A2BE2;
+            color: #E0E0E0;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .chart-controls select:hover {
+            border-color: #00FF00;
+            box-shadow: 0 0 15px rgba(0, 255, 0, 0.5);
+        }
+
+
+        /* Calendar Styles */
+        .calendar-nav {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 25px;
+            font-size: 1.8em;
+            font-weight: 600;
+            color: #8A2BE2; /* Blue Violet */
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        .calendar-nav button {
+            background: none;
+            border: none;
+            font-size: 2.2em;
+            cursor: pointer;
+            color: #00FFFF; /* Electric Cyan */
+            padding: 8px;
+            transition: color 0.2s ease-in-out;
+            text-shadow: 0 0 10px rgba(0, 255, 255, 0.6);
+        }
+
+        .calendar-nav button:hover {
+            color: #00FF00; /* Lime Green on hover */
+        }
+
+        .calendar-grid {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 30px;
+            background-color: #1A1A3A;
+            border: 2px solid #00FFFF;
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.5);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .calendar-grid th, .calendar-grid td {
+            border: 1px solid #404060; /* Darker, subtle grid lines */
+            padding: 16px;
+            text-align: center;
+            vertical-align: top;
+            color: #E0E0E0;
+            text-transform: uppercase;
+            font-size: 0.9em;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        .calendar-grid th {
+            background-color: #2A2A4A;
+            color: #00FF00; /* Lime Green header text */
+            font-weight: 600;
+            letter-spacing: 1px;
+            border-bottom: 2px solid #8A2BE2; /* Blue Violet separator */
+        }
+
+        .calendar-grid td {
+            min-height: 110px;
+            cursor: pointer;
+            transition: background-color 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
+            position: relative;
+        }
+
+        .calendar-grid td:hover {
+            background-color: #2A2A4A;
+            box-shadow: inset 0 0 15px rgba(138, 43, 226, 0.4);
+        }
+
+        .calendar-grid td.today {
+            background-color: rgba(255, 165, 0, 0.2); /* Transparent Bright Orange for today */
+            border: 2px solid #FFA500; /* Bright Orange border */
+            box-shadow: 0 0 20px rgba(255, 165, 0, 0.7);
+        }
+
+        .calendar-grid td.has-event {
+            background-color: rgba(0, 255, 0, 0.2); /* Transparent Lime Green for events */
+            font-weight: 500;
+            border: 2px solid #00FF00;
+            box-shadow: inset 0 0 12px rgba(0, 255, 0, 0.5);
+        }
+        .calendar-grid td.has-event:hover {
+            background-color: rgba(0, 255, 0, 0.3);
+            box-shadow: inset 0 0 20px rgba(0, 255, 0, 0.7);
+        }
+
+        .calendar-grid td.selected-date {
+            background-color: rgba(0, 255, 255, 0.2); /* Transparent Electric Cyan for selected */
+            border: 2px solid #00FFFF; /* Electric Cyan border */
+            box-shadow: 0 0 25px rgba(0, 255, 255, 0.8);
+        }
+
+        .calendar-day-number {
+            font-size: 1.4em;
+            font-weight: 700;
+            margin-bottom: 8px;
+            color: #E0E0E0;
+            text-shadow: none;
+        }
+
+        .event-indicator {
+            width: 12px;
+            height: 12px;
+            background-color: #8A2BE2; /* Blue Violet indicator */
+            border-radius: 50%;
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            box-shadow: 0 0 10px rgba(138, 43, 226, 0.7);
+        }
+
+        .events-for-selected-date {
+            margin-top: 30px;
+            padding: 25px;
+            background-color: #1A1A3A;
+            border: 2px solid #8A2BE2;
+            box-shadow: 0 0 20px rgba(138, 43, 226, 0.5);
+            text-align: left;
+            color: #E0E0E0;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            border-radius: 8px;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        /* Event Tooltip Styles */
+        .event-tooltip {
+            position: absolute;
+            background-color: #2A2A4A;
+            color: #E0E0E0;
+            padding: 18px 25px;
+            border: 2px solid #00FFFF;
+            font-size: 1em;
+            z-index: 1002;
+            display: none;
+            text-align: left;
+            max-width: 350px;
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.6);
+            pointer-events: none;
+            transition: opacity 0.2s ease-in-out;
+            opacity: 0;
+            border-radius: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        .event-tooltip.show {
+            opacity: 1;
+        }
+
+        .event-tooltip h5 {
+            margin-top: 0;
+            margin-bottom: 12px;
+            font-size: 1.3em;
+            color: #00FF00; /* Lime Green title */
+            font-weight: 600;
+            text-shadow: 0 0 8px rgba(0, 255, 0, 0.6);
+        }
+
+        .event-tooltip p {
+            margin-bottom: 10px;
+            line-height: 1.7;
+            color: #00FFFF; /* Electric Cyan */
+        }
+
+        /* Profile Section Specific Styles */
+        .profile-details {
+            background-color: #1A1A3A;
+            padding: 30px;
+            border: 2px solid #00FFFF;
+            text-align: left;
+            margin-top: 30px;
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.5);
+            color: #E0E0E0;
+            font-size: 1em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            border-radius: 8px;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        .profile-details p {
+            margin-bottom: 15px;
+            color: #E0E0E0;
+            font-size: 1.05em;
+        }
+
+        .profile-details p strong {
+            color: #00FF00; /* Lime Green labels */
+            font-weight: 600;
+        }
+
+        .password-change-section {
+            background-color: #1A1A3A;
+            padding: 30px;
+            border: 2px solid #8A2BE2;
+            margin-top: 35px;
+            box-shadow: 0 0 20px rgba(138, 43, 226, 0.5);
+            text-align: left;
+            color: #E0E0E0;
+            font-size: 1em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            border-radius: 8px;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        /* Logo styling (removed .app-logo rule as the img tag is removed) */
+        /* .app-logo {
+            width: 220px;
+            height: auto;
+            margin-bottom: 40px;
+            border: none;
+            box-shadow: 0 0 30px rgba(0, 255, 255, 0.8);
+            border-radius: 0;
+        } */
+
+        /* Note View Modal Styles */
+        .view-note-modal, .note-form-modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            backdrop-filter: blur(10px);
+        }
+
+        .view-note-content, .note-form-content {
+            background-color: #1A1A3A;
+            padding: 40px;
+            border: 2px solid #8A2BE2;
+            max-width: 750px;
+            width: 90%;
+            box-shadow: 0 0 30px rgba(138, 43, 226, 0.7);
+            text-align: left;
+            position: relative;
+            animation: fadeIn 0.4s ease-out;
+            color: #E0E0E0;
+            border-radius: 8px;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        .view-note-content h3, .note-form-content h3 {
+            color: #00FFFF;
+            margin-bottom: 25px;
+            font-size: 2.5em;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            text-shadow: 0 0 12px rgba(0, 255, 255, 0.7);
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        .view-note-content p {
+            color: #E0E0E0;
+            margin-bottom: 25px;
+            line-height: 1.8;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            max-height: 400px;
+            overflow-y: auto;
+            padding-right: 15px;
+            text-transform: uppercase;
+            font-size: 1.05em;
+            letter-spacing: 0.5px;
+        }
+
+        .view-note-content a.note-link {
+            color: #00FF00;
+            text-decoration: underline;
+            margin-top: 20px;
+            display: block;
+            word-wrap: break-word;
+            transition: color 0.2s ease-in-out;
+            text-shadow: 0 0 8px rgba(0, 255, 0, 0.6);
+        }
+        .view-note-content a.note-link:hover {
+            color: #8A2BE2;
+        }
+
+        .view-note-content .modal-actions, .note-form-content .modal-actions {
+            margin-top: 30px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 18px;
+        }
+
+        /* Notes Grid Container */
+        .note-list-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 35px;
+            margin-top: 30px;
+            padding-right: 0;
+            overflow-y: visible;
+        }
+
+        /* Note Card Styling */
+        .note-list-item-card {
+            background-color: #1A1A3A;
+            border: 2px solid rgba(0, 255, 255, 0.2);
+            box-shadow: 0 0 15px rgba(0, 255, 255, 0.3);
+            padding: 30px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            align-items: flex-start;
+            transition: all 0.2s ease-in-out;
+            position: relative;
+            overflow: hidden;
+            cursor: pointer;
+            color: #E0E0E0;
+            border-radius: 6px;
+            text-transform: uppercase;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        /* Note Card Hover Effects */
+        .note-list-item-card:hover {
+            transform: translateY(-8px);
+            box-shadow: 0 0 40px rgba(138, 43, 226, 0.8);
+            background-color: #2A2A4A;
+            border-color: #8A2BE2;
+        }
+
+        .note-card-header {
+            display: flex;
+            align-items: center;
+            width: 100%;
+            margin-bottom: 15px;
+            position: relative;
+        }
+
+        .note-card-icon {
+            width: 40px;
+            height: 40px;
+            color: #8A2BE2;
+            margin-right: 15px;
+            flex-shrink: 0;
+            filter: drop-shadow(0 0 8px rgba(138, 43, 226, 0.6));
+        }
+
+        .note-card-title {
+            font-weight: 600;
+            font-size: 1.4em;
+            color: #E0E0E0;
+            flex-grow: 1;
+            text-align: left;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            text-shadow: none;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        .note-card-footer {
+            width: 100%;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 18px;
+            padding-top: 18px;
+            border-top: 1px dashed #404060;
+        }
+
+        .note-card-date {
+            font-size: 0.95em;
+            color: #00FFFF;
+        }
+
+        /* Dropdown Menu for Note Card */
+        .note-card-menu {
+            position: relative;
+            display: inline-block;
+            margin-left: auto;
+        }
+
+        .note-card-menu-btn {
+            background: none;
+            border: none;
+            font-size: 2.2em;
+            cursor: pointer;
+            color: #E0E0E0;
+            padding: 6px;
+            transition: color 0.2s ease-in-out;
+            text-shadow: none;
+        }
+
+        .note-card-menu-btn:hover {
+            color: #00FF00;
+        }
+
+        .note-card-dropdown-content {
+            display: none;
+            position: absolute;
+            background-color: #2A2A4A;
+            min-width: 180px;
+            border: 2px solid #8A2BE2;
+            box-shadow: 0 0 20px rgba(138, 43, 226, 0.6);
+            z-index: 1;
+            right: 0;
+            border-radius: 6px;
+            overflow: hidden;
+            animation: slideDownFast 0.2s ease-out;
+            transform-origin: top right;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        @keyframes slideDownFast {
+            from { opacity: 0; transform: translateY(-12px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .note-card-dropdown-content.show {
+            display: block;
+        }
+
+        .note-card-dropdown-content a {
+            color: #E0E0E0;
+            padding: 14px 20px;
+            text-decoration: none;
+            display: block;
+            text-align: left;
+            transition: background-color 0.15s ease-in-out, color 0.15s ease-in-out;
+            font-size: 1em;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+        }
+
+        .note-card-dropdown-content a:hover {
+            background-color: #3A3A5A;
+            color: #00FF00;
+        }
+
+        /* Responsive Adjustments */
+        @media (max-width: 768px) {
+            .dashboard {
+                grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+                gap: 30px;
+            }
+            .note-list-container {
+                grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+            }
+            .container {
+                padding: 35px;
+            }
+            h1 {
+                font-size: 3em;
+                letter-spacing: 2px;
+            }
+            h2 {
+                font-size: 2.2em;
+                letter-spacing: 1.5px;
+            }
+            .btn {
+                padding: 16px 28px;
+                font-size: 17px;
+                margin: 10px;
+                letter-spacing: 1.5px;
+            }
+            input, textarea, select {
+                padding: 14px;
+                font-size: 1em;
+            }
+            .chart-container {
+                min-height: 450px;
+                padding: 30px;
+            }
+            .score-list-item, .achievement-list-item, .deadline-list-item, .todo-list-item, .event-list-item {
+                padding: 16px 22px;
+                font-size: 0.95em;
+                letter-spacing: 0.8px;
+            }
+            .delete-btn, .complete-btn {
+                padding: 10px 20px;
+                font-size: 0.85em;
+                letter-spacing: 0.8px;
+            }
+            .timer-display {
+                font-size: 4.5em;
+                letter-spacing: 2px;
+            }
+            .calendar-grid th, .calendar-grid td {
+                padding: 14px;
+                min-height: 100px;
+            }
+            .calendar-day-number {
+                font-size: 1.3em;
+            }
+            .event-indicator {
+                width: 10px;
+                height: 10px;
+                top: 8px;
+                right: 8px;
+            }
+            .event-tooltip {
+                max-width: 90%;
+                font-size: 0.9em;
+                padding: 16px 22px;
+            }
+            .view-note-content, .note-form-content {
+                padding: 35px;
+            }
+            .view-note-content h3, .note-form-content h3 {
+                font-size: 2.2em;
+                letter-spacing: 1.5px;
+            }
+            .note-list-item-card {
+                padding: 25px;
+            }
+            .note-card-icon {
+                width: 36px;
+                height: 36px;
+            }
+            .note-card-title {
+                font-size: 1.3em;
+            }
+        }
+
+        @media (max-width: 500px) {
+            .dashboard {
+                grid-template-columns: 1fr;
+            }
+            .note-list-container {
+                grid-template-columns: 1fr;
+            }
+            .container {
+                padding: 25px;
+                margin: 10px;
+            }
+            h1 {
+                font-size: 2.5em;
+                letter-spacing: 1.5px;
+            }
+            h2 {
+                font-size: 1.8em;
+                letter-spacing: 1px;
+            }
+            .btn {
+                padding: 14px 25px;
+                font-size: 16px;
+                margin: 8px;
+                letter-spacing: 1px;
+            }
+            .time-input-group, .score-input-group, .achievement-input-group, .deadline-input-group, .todo-input-group, .event-input-group {
+                gap: 12px;
+                margin-bottom: 20px;
+            }
+            .time-input-group input {
+                width: 100%;
+            }
+            .delete-btn, .complete-btn {
+                margin-left: 0;
+                margin-top: 10px;
+                width: 100%;
+            }
+            .calendar-grid th, .calendar-grid td {
+                padding: 10px;
+                min-height: 80px;
+            }
+            .calendar-day-number {
+                font-size: 1.2em;
+            }
+            .event-indicator {
+                width: 9px;
+                height: 9px;
+                top: 7px;
+                right: 7px;
+            }
+            .event-tooltip {
+                max-width: 95%;
+                font-size: 0.85em;
+                padding: 14px 20px;
+            }
+            .view-note-content, .note-form-content {
+                padding: 30px;
+            }
+            .view-note-content h3, .note-form-content h3 {
+                font-size: 2em;
+                letter-spacing: 1.2px;
+            }
+            .note-list-item-card {
+                padding: 20px;
+            }
+            .note-card-icon {
+                width: 32px;
+                height: 32px;
+            }
+            .note-card-title {
+                font-size: 1.2em;
+            }
+        }
+
+        /* Specific styling for the app name display on the dashboard */
+        .app-name-display {
+            font-family: 'Exo 2', sans-serif;
+            font-size: 1.8em;
+            font-weight: 600;
+            color: #8A2BE2;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            text-shadow: 0 0 10px rgba(138, 43, 226, 0.6);
+            margin-bottom: 25px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Welcome Page -->
+        <div class="page active" id="welcomePage">
+            <!-- Logo image removed as per user request -->
+            <h1>STUDY TRACKER PRO</h1>
+            <p class="welcome-text">ACCESS YOUR LEARNING PLATFORM. TRACK PROGRESS, MANAGE DEADLINES, AND ACHIEVE OPTIMAL PERFORMANCE.</p>
+            <button class="btn" onclick="showPage('signupPage')" id="signupBtn">SIGN UP</button>
+            <button class="btn" onclick="showPage('loginPage')" id="loginBtn">LOG IN</button>
+        </div>
+
+        <!-- Sign Up Page -->
+        <div class="page" id="signupPage">
+            <h2>CREATE YOUR ACCOUNT</h2>
+            <form id="signupForm">
+                <div class="form-group">
+                    <label for="signupEmail">EMAIL *</label>
+                    <input type="email" id="signupEmail" placeholder="ENTER YOUR EMAIL" required>
+                </div>
+                <div class="form-group">
+                    <label for="signupUsername">USERNAME *</label>
+                    <input type="text" id="signupUsername" placeholder="CHOOSE A UNIQUE USERNAME" required>
+                </div>
+                <div class="form-group">
+                    <label for="signupPassword">PASSWORD *</label>
+                    <input type="password" id="signupPassword" placeholder="ENTER YOUR PASSWORD" required>
+                </div>
+                <div class="form-group">
+                    <label for="signupConfirmPassword">CONFIRM PASSWORD *</label>
+                    <input type="password" id="signupConfirmPassword" placeholder="CONFIRM YOUR PASSWORD" required>
+                </div>
+                <div class="form-group">
+                    <label for="signupFullName">FULL NAME *</label>
+                    <input type="text" id="signupFullName" placeholder="ENTER YOUR FULL NAME" required>
+                </div>
+                <div class="form-group">
+                    <label for="signupGrade">GRADE/YEAR *</label>
+                    <input type="text" id="signupGrade" placeholder="E.G., 10TH GRADE, FRESHMAN" required>
+                </div>
+                <div class="form-group">
+                    <label for="signupClass">CLASS/MAJOR *</label>
+                    <input type="text" id="signupClass" placeholder="E.G., HIGH SCHOOL, COMPUTER SCIENCE" required>
+                </div>
+                <div class="form-group">
+                    <label for="signupInterests">INTERESTS (COMMA-SEPARATED)</label>
+                    <input type="text" id="signupInterests" placeholder="E.G., MATH, SCIENCE, CODING">
+                </div>
+                <div class="form-group">
+                    <label for="signupSkills">SKILLS (COMMA-SEPARATED)</label>
+                    <input type="text" id="signupSkills" placeholder="E.G., PROBLEM SOLVING, DATA ANALYSIS">
+                </div>
+                <button type="submit" class="btn">REGISTER</button>
+            </form>
+            <button class="btn back-btn" onclick="showPage('welcomePage')">BACK TO WELCOME</button>
+        </div>
+
+        <!-- Login Page -->
+        <div class="page" id="loginPage">
+            <h2>LOG IN TO YOUR ACCOUNT</h2>
+            <form id="loginForm">
+                <div class="form-group">
+                    <label for="loginEmail">EMAIL *</label>
+                    <input type="email" id="loginEmail" placeholder="ENTER YOUR EMAIL" required>
+                </div>
+                <div class="form-group">
+                    <label for="loginPassword">PASSWORD *</label>
+                    <input type="password" id="loginPassword" placeholder="ENTER YOUR PASSWORD" required>
+                </div>
+                <button type="submit" class="btn">LOGIN</button>
+            </form>
+            <button class="btn back-btn" onclick="showPage('welcomePage')">BACK TO WELCOME</button>
+        </div>
+
+        <!-- Dashboard Page -->
+        <div class="page" id="dashboardPage">
+            <h2 id="dashboardWelcome">WELCOME, USER!</h2>
+            <p class="app-name-display">📚 STUDY TRACKER PRO</p>
+            <p id="currentUserIdDisplay" class="user-info">USER ID: <span style="font-family: 'Exo 2', sans-serif;">${userId || 'N/A'}</span></p>
+            <div class="dashboard">
+                <div class="dashboard-item" onclick="showPage('profilePage')">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
+                    </svg>
+                    <h3>MY PROFILE</h3>
+                    <p>ACCESS YOUR PERSONAL RECORDS.</p>
+                </div>
+                <div class="dashboard-item" onclick="showPage('progressPage')">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M16 11V3H8v8H2v10h20V11h-6zm-6-6h4v6h-4V5zm-6 8h4v6H4v-6zm16 6h-4v-6h4v6z"/>
+                    </svg>
+                    <h3>PROGRESS TRACKER</h3>
+                    <p>MONITOR YOUR PERFORMANCE METRICS.</p>
+                </div>
+                <div class="dashboard-item" onclick="showPage('achievementsPage')">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/>
+                    </svg>
+                    <h3>ACHIEVEMENTS</h3>
+                    <p>REVIEW YOUR COMPLETED OBJECTIVES.</p>
+                </div>
+                <div class="dashboard-item" onclick="showPage('deadlinesPage')">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-.22-13.22L11 7.5v5.25L16.25 15l.75-1.22-4.47-2.45z"/>
+                    </svg>
+                    <h3>DEADLINES</h3>
+                    <p>TRACK YOUR PENDING ASSIGNMENTS.</p>
+                </div>
+                <div class="dashboard-item" onclick="showPage('todoPage')">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/>
+                    </svg>
+                    <h3>TO-DO LIST</h3>
+                    <p>MANAGE YOUR ACTIVE OBJECTIVES.</p>
+                </div>
+                <div class="dashboard-item" onclick="showPage('timeTrackerPage')">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M15 1H9v2h6V1zm-2 13h-2V8h2v6zm8.22-3.22l-1.41-1.41L16 11.59l1.22 1.22 1.41-1.41zm-14.44 0L6 11.59 4.78 10.37 3.37 11.78l1.41 1.41zM12 4c-4.97 0-9 4.03-9 9s4.03 9 9 9 9-4.03 9-9-4.03-9-9-9zm0 16c-3.86 0-7-3.14-7-7s3.14-7 7-7 7 3.14 7 7-3.14 7-7 7z"/>
+                    </svg>
+                    <h3>TIME TRACKER</h3>
+                    <p>MONITOR STUDY SESSION DURATION.</p>
+                </div>
+                <div class="dashboard-item" onclick="showPage('eventsPage')">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.11 0-1.99.9-1.99 2L3 19c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11zM7 10h5v5H7z"/>
+                    </svg>
+                    <h3>EVENTS CALENDAR</h3>
+                    <p>PLAN YOUR ACADEMIC ENGAGEMENTS.</p>
+                </div>
+                <div class="dashboard-item" onclick="showPage('notesPage')">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm-2 16H9v-2h3v2zm3-4H9v-2h6v2zm0-4H9V8h6v2z"/>
+                    </svg>
+                    <h3>NOTES</h3>
+                    <p>CREATE AND ORGANIZE TEXTUAL DATA.</p>
+                </div>
+            </div>
+            <button class="btn back-btn" onclick="logout()">LOG OUT</button>
+        </div>
+
+        <!-- Profile Page -->
+        <div class="page" id="profilePage">
+            <h2>MY PROFILE</h2>
+            <div class="profile-section">
+                <div class="profile-details">
+                    <p><strong>EMAIL:</strong> <span id="profileEmail"></span></p>
+                    <p><strong>USERNAME:</strong> <span id="profileUsername"></span></p>
+                    <p><strong>FULL NAME:</strong> <span id="profileFullName"></span></p>
+                    <p><strong>GRADE/YEAR:</strong> <span id="profileGrade"></span></p>
+                    <p><strong>CLASS/MAJOR:</strong> <span id="profileClass"></span></p>
+                    <p><strong>INTERESTS:</strong> <span id="profileInterests"></span></p>
+                    <p><strong>SKILLS:</strong> <span id="profileSkills"></span></p>
+                </div>
+
+                <div class="password-change-section">
+                    <h3>CHANGE PASSWORD</h3>
+                    <div class="form-group">
+                        <label for="oldPassword">CURRENT PASSWORD (FOR RE-AUTHENTICATION IF NEEDED)</label>
+                        <input type="password" id="oldPassword" placeholder="RE-ENTER CURRENT PASSWORD" disabled>
+                    </div>
+                    <div class="form-group">
+                        <label for="newPassword">NEW PASSWORD *</label>
+                        <input type="password" id="newPassword" placeholder="ENTER NEW PASSWORD" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="confirmNewPassword">CONFIRM NEW PASSWORD *</label>
+                        <input type="password" id="confirmNewPassword" placeholder="CONFIRM NEW PASSWORD" required>
+                    </div>
+                    <button class="btn" onclick="changePassword()">UPDATE PASSWORD</button>
+                </div>
+            </div>
+            <button class="btn back-btn" onclick="showPage('dashboardPage')">BACK TO DASHBOARD</button>
+        </div>
+
+        <!-- Progress Tracker Page -->
+        <div class="page" id="progressPage">
+            <h2>STUDY PROGRESS</h2>
+            <div class="progress-section">
+                <div class="form-group score-input-group">
+                    <div>
+                        <label for="studySubject">SUBJECT:</label>
+                        <input type="text" id="studySubject" placeholder="E.G., MATH, HISTORY" required>
+                    </div>
+                    <div>
+                        <label for="studyScore">SCORE (0-100):</label>
+                        <input type="number" id="studyScore" min="0" max="100" placeholder="E.G., 85" required>
+                    </div>
+                    <div>
+                        <label for="studyDate">DATE:</label>
+                        <input type="date" id="studyDate" required>
+                    </div>
+                    <button class="btn" onclick="addStudyScore()">ADD SCORE</button>
+                </div>
+                <div class="chart-container">
+                    <canvas id="studyProgressChart"></canvas>
+                </div>
+                <h3>RECENT SCORES:</h3>
+                <div id="studyScoreList" class="score-list-container">
+                    <!-- Study scores will be listed here -->
+                </div>
+            </div>
+            <button class="btn back-btn" onclick="showPage('dashboardPage')">BACK TO DASHBOARD</button>
+        </div>
+
+        <!-- Achievements Page -->
+        <div class="page" id="achievementsPage">
+            <h2>YOUR ACHIEVEMENTS</h2>
+            <div class="achievements-section">
+                <div class="form-group achievement-input-group">
+                    <div>
+                        <label for="achievementTitle">ACHIEVEMENT TITLE:</label>
+                        <input type="text" id="achievementTitle" placeholder="E.G., COMPLETED CALCULUS I" required>
+                    </div>
+                    <div>
+                        <label for="achievementDescription">DESCRIPTION:</label>
+                        <textarea id="achievementDescription" placeholder="DETAILS ABOUT YOUR ACHIEVEMENT"></textarea>
+                    </div>
+                    <div>
+                        <label for="achievementDate">DATE ACHIEVED:</label>
+                        <input type="date" id="achievementDate" required>
+                    </div>
+                    <button class="btn" onclick="addAchievement()">ADD ACHIEVEMENT</button>
+                </div>
+                <h3>YOUR ACHIEVEMENTS:</h3>
+                <div id="achievementList" class="achievement-list-container">
+                    <!-- Achievements will be listed here -->
+                </div>
+            </div>
+            <button class="btn back-btn" onclick="showPage('dashboardPage')">BACK TO DASHBOARD</button>
+        </div>
+
+        <!-- Deadlines Page -->
+        <div class="page" id="deadlinesPage">
+            <h2>UPCOMING DEADLINES</h2>
+            <div class="deadlines-section">
+                <div class="form-group deadline-input-group">
+                    <div>
+                        <label for="deadlineTitle">DEADLINE TITLE:</label>
+                        <input type="text" id="deadlineTitle" placeholder="E.G., ESSAY SUBMISSION" required>
+                    </div>
+                    <div>
+                        <label for="deadlineDescription">DESCRIPTION:</label>
+                        <textarea id="deadlineDescription" placeholder="DETAILS ABOUT THE ASSIGNMENT"></textarea>
+                    </div>
+                    <div>
+                        <label for="deadlineDate">DUE DATE:</label>
+                        <input type="date" id="deadlineDate" required>
+                    </div>
+                    <button class="btn" onclick="addDeadline()">ADD DEADLINE</button>
+                </div>
+                <h3>ALL DEADLINES:</h3>
+                <div id="deadlineList" class="deadline-list-container">
+                    <!-- Deadlines will be listed here -->
+                </div>
+            </div>
+            <button class="btn back-btn" onclick="showPage('dashboardPage')">BACK TO DASHBOARD</button>
+        </div>
+
+        <!-- To-Do List Page -->
+        <div class="page" id="todoPage">
+            <h2>YOUR TO-DO LIST</h2>
+            <div class="todo-section">
+                <div class="form-group todo-input-group">
+                    <div>
+                        <label for="todoTask">NEW TASK:</label>
+                        <input type="text" id="todoTask" placeholder="E.G., READ CHAPTER 5" required>
+                    </div>
+                    <button class="btn" onclick="addTodo()">ADD TASK</button>
+                </div>
+                <h3>TASKS:</h3>
+                <div id="todoList" class="todo-list-container">
+                    <!-- To-Do items will be listed here -->
+                </div>
+            </div>
+            <button class="btn back-btn" onclick="showPage('dashboardPage')">BACK TO DASHBOARD</button>
+        </div>
+
+        <!-- Time Tracker Page -->
+        <div class="page" id="timeTrackerPage">
+            <h2>STUDY TIME TRACKER</h2>
+            <div class="time-tracker-section">
+                <div class="timer-display" id="timerDisplay">00:00:00</div>
+                <div class="timer-controls">
+                    <button class="btn" id="startTimerBtn">START</button>
+                    <button class="btn" id="pauseTimerBtn" disabled>PAUSE</button>
+                    <button class="btn" id="resetTimerBtn">RESET</button>
+                    <button class="btn" id="logTimerSessionBtn">LOG SESSION</button> <!-- New button -->
+                </div>
+                <p class="log-message" id="timerLogMessage"></p>
+
+                <h3>STUDY TIME OVERVIEW:</h3> <!-- New heading for chart -->
+                <div class="chart-controls">
+                    <label for="timeChartFilter">VIEW BY:</label>
+                    <select id="timeChartFilter" onchange="updateStudyTimeChart()">
+                        <option value="day">DAY</option>
+                        <option value="week">WEEK</option>
+                        <option value="month">MONTH</option>
+                    </select>
+                </div>
+                <div class="chart-container">
+                    <canvas id="studyTimeChart"></canvas> <!-- New chart canvas -->
+                </div>
+
+                <h3>MANUALLY LOG STUDY TIME</h3>
+                <div class="form-group time-input-group">
+                    <div>
+                        <label for="manualHours">HOURS:</label>
+                        <input type="number" id="manualHours" min="0" value="0">
+                    </div>
+                    <div>
+                        <label for="manualMinutes">MINUTES:</label>
+                        <input type="number" id="manualMinutes" min="0" max="59" value="0">
+                    </div>
+                    <div>
+                        <label for="manualSubject">SUBJECT:</label>
+                        <input type="text" id="manualSubject" placeholder="E.G., PHYSICS" required>
+                    </div>
+                    <div>
+                        <label for="manualLogDate">DATE:</label>
+                        <input type="date" id="manualLogDate" required>
+                    </div>
+                    <button class="btn" onclick="addManualLog()">LOG TIME</button>
+                </div>
+                <h3>LOGGED SESSIONS:</h3>
+                <div id="manualLogList" class="manual-log-list-container">
+                    <!-- Manual logs will be listed here -->
+                </div>
+            </div>
+            <button class="btn back-btn" onclick="showPage('dashboardPage')">BACK TO DASHBOARD</button>
+        </div>
+
+        <!-- Events Calendar Page -->
+        <div class="page" id="eventsPage">
+            <h2>EVENTS CALENDAR</h2>
+            <div class="events-section">
+                <div class="calendar-nav">
+                    <button onclick="prevMonth()">&#9664; PREV</button>
+                    <span id="currentMonthYear"></span>
+                    <button onclick="nextMonth()">NEXT &#9654;</button>
+                </div>
+                <table class="calendar-grid" id="calendarGrid">
+                    <thead>
+                        <tr>
+                            <th>SUN</th><th>MON</th><th>TUE</th><th>WED</th><th>THU</th><th>FRI</th><th>SAT</th>
+                        </tr>
+                    </thead>
+                    <tbody id="calendarBody">
+                        <!-- Calendar days will be rendered here -->
+                    </tbody>
+                </table>
+
+                <h3>ADD NEW EVENT</h3>
+                <div class="form-group event-input-group">
+                    <div>
+                        <label for="eventTitle">EVENT TITLE:</label>
+                        <input type="text" id="eventTitle" placeholder="E.G., MIDTERM EXAM" required>
+                    </div>
+                    <div>
+                        <label for="eventDescription">DESCRIPTION:</label>
+                        <textarea id="eventDescription" placeholder="DETAILS ABOUT THE EVENT"></textarea>
+                    </div>
+                    <div>
+                        <label for="eventDate">DATE:</label>
+                        <input type="date" id="eventDate" required>
+                    </div>
+                    <button class="btn" onclick="addEvent()">ADD EVENT</button>
+                </div>
+
+                <div id="eventsForSelectedDate" class="events-for-selected-date">
+                    <h4>EVENTS FOR <span id="selectedDateDisplay"></span>:</h4>
+                    <div id="selectedDateEventsList">
+                        <p>NO EVENTS FOR THIS DATE.</p>
+                    </div>
+                </div>
+            </div>
+            <button class="btn back-btn" onclick="showPage('dashboardPage')">BACK TO DASHBOARD</button>
+        </div>
+
+        <!-- Notes Page -->
+        <div class="page" id="notesPage">
+            <h2>YOUR NOTES</h2>
+            <div class="notes-section">
+                <button class="btn" onclick="openNoteFormModal()">CREATE NEW NOTE</button>
+                <h3>YOUR NOTES:</h3>
+                <div id="noteList" class="note-list-container">
+                    <!-- Notes will be listed here -->
+                </div>
+            </div>
+            <button class="btn back-btn" onclick="showPage('dashboardPage')">BACK TO DASHBOARD</button>
+        </div>
+    </div>
+
+    <!-- Custom Modal for Messages -->
+    <div id="customModal" class="modal-message">
+        <p id="modalMessageText"></p>
+        <button class="modal-close-btn" onclick="hideModal()">OK</button>
+    </div>
+
+    <!-- New: Note View Modal -->
+    <div id="viewNoteModal" class="view-note-modal" style="display: none;">
+        <div class="view-note-content">
+            <h3 id="viewNoteTitle"></h3>
+            <p id="viewNoteContent"></p>
+            <a id="viewNoteLink" href="#" target="_blank" rel="noopener noreferrer" class="note-link" style="display: none;"></a>
+            <div class="modal-actions">
+                <button class="btn" id="editNoteFromViewBtn">EDIT</button>
+                <button class="btn delete-btn" id="deleteNoteFromViewBtn">DELETE</button>
+                <button class="btn back-btn" onclick="hideViewNoteModal()">CLOSE</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- New: Note Form Modal (for Add/Edit) -->
+    <div id="noteFormModal" class="note-form-modal" style="display: none;">
+        <div class="note-form-content">
+            <h3 id="noteFormModalTitle">ADD NEW NOTE</h3>
+            <div class="form-group">
+                <label for="noteTitleInput">NOTE TITLE:</label>
+                <input type="text" id="noteTitleInput" placeholder="E.G., BIOLOGY CHAPTER 3 SUMMARY" required>
+            </div>
+            <div class="form-group">
+                <label for="noteContentInput">NOTE CONTENT:</label>
+                <textarea id="noteContentInput" placeholder="WRITE YOUR NOTES HERE..."></textarea>
+            </div>
+            <div class="form-group">
+                <label for="noteLinkInput">EXTERNAL LINK (OPTIONAL):</label>
+                <input type="url" id="noteLinkInput" placeholder="E.G., HTTPS://DRIVE.GOOGLE.COM/DOC/123">
+            </div>
+            <div class="modal-actions">
+                <button class="btn" id="saveNoteFormBtn" onclick="addOrUpdateNote()">SAVE CHANGES</button>
+                <button class="btn back-btn" onclick="closeNoteFormModal()">CANCEL</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div id="loadingOverlay" class="loading-overlay" style="display: none;">
+        <div class="spinner-container">
+            <div class="spinner"></div>
+            <p>LOADING...</p>
+        </div>
+    </div>
+
+    <div id="eventTooltip" class="event-tooltip"></div>
+</body>
+</html>

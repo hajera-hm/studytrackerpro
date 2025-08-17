@@ -11,7 +11,8 @@
     <!-- Firebase SDKs -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        // Added sendEmailVerification to imports
+        import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, sendEmailVerification } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, collection, query, orderBy, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // --- Global Firebase Variables ---
@@ -55,6 +56,9 @@
 
         // Flag to ensure initial deadline notification is sent only once after data load
         let hasDeadlinesLoadedInitial = false;
+
+        let resendCooldown = false; // Cooldown flag for resending verification email
+        const COOLDOWN_SECONDS = 60; // 1 minute cooldown for resend email
 
         // --- Utility Functions ---
 
@@ -107,13 +111,41 @@
         /**
          * Displays a custom modal message.
          * @param {string} message The message to display.
-         * @param {string} type The type of message (e.g., 'success', 'error').
+         * @param {string} type The type of message (e.g., 'success', 'error', 'warning').
+         * @param {boolean} isForgotPassword If true, apply specific font and no uppercase.
          */
-        function showModal(message, type = 'info') {
+        function showModal(message, type = 'info', isForgotPassword = false) {
             const modal = document.getElementById('customModal');
             const messageText = document.getElementById('modalMessageText');
             messageText.textContent = message;
-            modal.style.display = 'block';
+
+            if (isForgotPassword) {
+                messageText.style.fontFamily = "'Times New Roman', serif";
+                messageText.style.textTransform = 'none'; // Ensure case is preserved
+            } else {
+                // Reset to default for other messages
+                messageText.style.fontFamily = "'Exo 2', sans-serif";
+                messageText.style.textTransform = 'uppercase'; // Revert to default
+            }
+
+            // Set border and text color based on type
+            const modalContent = modal.querySelector('.modal-message-content');
+            if (modalContent) {
+                if (type === 'success') {
+                    modalContent.style.borderColor = '#00FF00'; // Lime Green
+                    messageText.style.color = '#00FF00';
+                } else if (type === 'error') {
+                    modalContent.style.borderColor = '#FF0000'; // Bright Red
+                    messageText.style.color = '#FF0000';
+                } else if (type === 'warning') {
+                    modalContent.style.borderColor = '#FFA500'; // Bright Orange
+                    messageText.style.color = '#FFA500';
+                } else { // info
+                    modalContent.style.borderColor = '#8A2BE2'; // Blue Violet
+                    messageText.style.color = '#00FFFF';
+                }
+            }
+            modal.style.display = 'flex'; // Use flex for centering
         }
         window.showModal = showModal; // Make globally accessible
 
@@ -122,8 +154,25 @@
          */
         function hideModal() {
             document.getElementById('customModal').style.display = 'none';
+            // Reset font style of the message text when hiding the modal
+            document.getElementById('modalMessageText').style.fontFamily = "'Exo 2', sans-serif";
+            document.getElementById('modalMessageText').style.textTransform = 'uppercase';
+            const modalContent = document.getElementById('customModal').querySelector('.modal-message-content');
+            if (modalContent) {
+                // Reset border color to default for 'info' type
+                modalContent.style.borderColor = '#8A2BE2';
+            }
         }
         window.hideModal = hideModal; // Make globally accessible
+
+        /**
+         * Displays a message for "Forgot Password?"
+         */
+        function forgotPassword() {
+            // Updated message to include exact email capitalization
+            showModal("Try contacting the owner through gmail for further assistance: studytrackerpro.h@gmail.com", 'info', true);
+        }
+        window.forgotPassword = forgotPassword; // Make globally accessible
 
         /**
          * Sets up real-time listeners for all user data in Firestore.
@@ -251,19 +300,19 @@
 
             if (!email || !username || !password || !confirmPassword || !fullName || !grade || !className) {
                 hideLoading();
-                showModal("PLEASE FILL IN ALL REQUIRED FIELDS (EMAIL, USERNAME, PASSWORD, FULL NAME, GRADE, CLASS).");
+                showModal("PLEASE FILL IN ALL REQUIRED FIELDS (EMAIL, USERNAME, PASSWORD, FULL NAME, GRADE, CLASS).", "warning");
                 return;
             }
 
             if (password !== confirmPassword) {
                 hideLoading();
-                showModal("PASSWORDS DO NOT MATCH.");
+                showModal("PASSWORDS DO NOT MATCH.", "warning");
                 return;
             }
 
             if (password.length < 6) {
                 hideLoading();
-                showModal("PASSWORD MUST BE AT LEAST 6 CHARACTERS LONG.");
+                showModal("PASSWORD MUST BE AT LEAST 6 CHARACTERS LONG.", "warning");
                 return;
             }
 
@@ -282,7 +331,7 @@
                     // If username exists, delete the newly created auth user and inform.
                     await user.delete();
                     hideLoading();
-                    showModal("USERNAME ALREADY TAKEN. PLEASE CHOOSE ANOTHER.");
+                    showModal("USERNAME ALREADY TAKEN. PLEASE CHOOSE ANOTHER.", "warning");
                     return;
                 }
                 
@@ -306,14 +355,17 @@
                 console.log(`Setting username to UID mapping at: ${usernameToUidPath}`);
                 await setDoc(doc(db, usernameToUidPath), { uid: uid, email: email });
 
-                loggedInUsername = username;
+                // Send email verification
+                await sendEmailVerification(user);
+                console.log("Verification email sent to:", user.email);
+
+                loggedInUsername = username; // Temporarily set for display on verify page
                 userId = uid;
                 hasDeadlinesLoadedInitial = false; // Reset for new user
-                setupFirestoreListeners(); // Set up listeners for the new user
+                
                 hideLoading();
-                showModal("ACCOUNT CREATED SUCCESSFULLY! WELCOME TO STUDY TRACKER PRO.", "success");
-                showPage('dashboardPage');
-
+                showModal("ACCOUNT CREATED SUCCESSFULLY! PLEASE CHECK YOUR EMAIL TO VERIFY YOUR ACCOUNT.", "success");
+                showPage('verifyEmailPage'); // Redirect to verification page
             } catch (error) {
                 console.error("Error during signup:", error);
                 hideLoading();
@@ -325,7 +377,7 @@
                 } else if (error.code === 'auth/weak-password') {
                     errorMessage = "PASSWORD IS TOO WEAK. PLEASE CHOOSE A STRONGER PASSWORD.";
                 }
-                showModal(errorMessage);
+                showModal(errorMessage, "error");
             }
         }
 
@@ -341,7 +393,7 @@
 
             if (!email || !password) {
                 hideLoading();
-                showModal("PLEASE ENTER BOTH EMAIL AND PASSWORD.");
+                showModal("PLEASE ENTER BOTH EMAIL AND PASSWORD.", "warning");
                 return;
             }
 
@@ -350,7 +402,17 @@
                 const user = userCredential.user;
                 const uid = user.uid;
 
-                // Fetch username from the user's profile document
+                if (!user.emailVerified) {
+                    // Email not verified
+                    loggedInUsername = null; // Clear username until verified
+                    userId = uid; // Keep userId for resending email on the verify page
+                    hideLoading();
+                    showModal("YOUR EMAIL ADDRESS IS NOT VERIFIED. PLEASE CHECK YOUR INBOX FOR A VERIFICATION LINK.", "warning");
+                    showPage('verifyEmailPage'); // Redirect to verification page
+                    return; // Stop further login processing
+                }
+
+                // If email is verified, proceed to fetch profile and setup listeners
                 const userProfilePath = `artifacts/${appId}/users/${uid}/profile/userDoc`;
                 const userProfileRef = doc(db, userProfilePath);
                 console.log(`Fetching user profile for existing session from: ${userProfilePath}`);
@@ -382,7 +444,7 @@
                 } else if (error.code === 'auth/invalid-email') {
                     errorMessage = "PLEASE ENTER A VALID EMAIL ADDRESS.";
                 }
-                showModal(errorMessage);
+                showModal(errorMessage, "error");
             }
         }
 
@@ -419,10 +481,63 @@
             } catch (error) {
                 console.error("Error during logout:", error);
                 hideLoading();
-                showModal(`LOGOUT FAILED: ${error.message}`);
+                showModal(`LOGOUT FAILED: ${error.message}`, "error");
             }
         }
         window.logout = logout; // Make globally accessible
+
+        /**
+         * Resends the email verification link to the current user.
+         */
+        async function resendVerificationEmail() {
+            if (!auth.currentUser) {
+                showModal("NO USER LOGGED IN.", "error");
+                return;
+            }
+            if (auth.currentUser.emailVerified) {
+                showModal("YOUR EMAIL IS ALREADY VERIFIED.", "info");
+                showPage('dashboardPage'); // Redirect to dashboard if already verified
+                return;
+            }
+            if (resendCooldown) {
+                showModal(`PLEASE WAIT ${COOLDOWN_SECONDS} SECONDS BEFORE RESENDING THE EMAIL.`, "warning");
+                return;
+            }
+
+            showLoading();
+            try {
+                await sendEmailVerification(auth.currentUser);
+                resendCooldown = true;
+                const resendButton = document.getElementById('resendEmailBtn');
+                let countdown = COOLDOWN_SECONDS;
+                resendButton.disabled = true;
+                resendButton.textContent = `RESEND IN ${countdown}s`;
+
+                const cooldownInterval = setInterval(() => {
+                    countdown--;
+                    if (countdown <= 0) {
+                        clearInterval(cooldownInterval);
+                        resendCooldown = false;
+                        resendButton.textContent = 'RESEND VERIFICATION EMAIL';
+                        resendButton.disabled = false;
+                    } else {
+                        resendButton.textContent = `RESEND IN ${countdown}s`;
+                    }
+                }, 1000);
+
+                hideLoading();
+                showModal("VERIFICATION EMAIL SENT. PLEASE CHECK YOUR INBOX (AND SPAM FOLDER!).", "success");
+            } catch (error) {
+                console.error("Error resending verification email:", error);
+                hideLoading();
+                let errorMessage = "FAILED TO RESEND VERIFICATION EMAIL. PLEASE TRY AGAIN.";
+                if (error.code === 'auth/too-many-requests') {
+                    errorMessage = "TOO MANY REQUESTS. PLEASE TRY AGAIN LATER.";
+                }
+                showModal(errorMessage, "error");
+            }
+        }
+        window.resendVerificationEmail = resendVerificationEmail; // Make global
 
         // --- Profile Functions ---
         /**
@@ -457,11 +572,11 @@
                     document.getElementById('profileSkills').textContent = user.skills || 'N/A';
                 } else {
                     console.warn("User profile document not found for current user ID:", userId);
-                    showModal("YOUR PROFILE DATA COULD NOT BE LOADED.");
+                    showModal("YOUR PROFILE DATA COULD NOT BE LOADED.", "warning");
                 }
             } catch (error) {
                 console.error("Error fetching profile details:", error);
-                showModal("ERROR LOADING PROFILE DETAILS. PLEASE TRY AGAIN.");
+                showModal("ERROR LOADING PROFILE DETAILS. PLEASE TRY AGAIN.", "error");
             }
         }
 
@@ -470,7 +585,7 @@
          */
         async function changePassword() {
             if (!userId) {
-                showModal("PLEASE LOG IN TO CHANGE YOUR PASSWORD.");
+                showModal("PLEASE LOG IN TO CHANGE YOUR PASSWORD.", "warning");
                 return;
             }
             showLoading();
@@ -480,19 +595,19 @@
 
             if (!newPassword || !confirmNewPassword) {
                 hideLoading();
-                showModal("PLEASE FILL IN ALL PASSWORD FIELDS.");
+                showModal("PLEASE FILL IN ALL PASSWORD FIELDS.", "warning");
                 return;
             }
 
             if (newPassword.length < 6) {
                 hideLoading();
-                showModal("PASSWORD MUST BE AT LEAST 6 CHARACTERS LONG.");
+                showModal("PASSWORD MUST BE AT LEAST 6 CHARACTERS LONG.", "warning");
                 return;
             }
 
             if (newPassword !== confirmNewPassword) {
                 hideLoading();
-                showModal("NEW PASSWORDS DO NOT MATCH.");
+                showModal("NEW PASSWORDS DO NOT MATCH.", "warning");
                 return;
             }
 
@@ -513,7 +628,7 @@
                     showPage('loginPage');
                 } else {
                     hideLoading();
-                    showModal("NO AUTHENTICATED USER FOUND. PLEASE LOG IN.");
+                    showModal("NO AUTHENTICATED USER FOUND. PLEASE LOG IN.", "warning");
                 }
 
             } catch (error) {
@@ -523,7 +638,7 @@
                 if (error.code === 'auth/requires-recent-login') {
                     errorMessage = "PLEASE RE-AUTHENTICATE BY LOGGING IN AGAIN BEFORE CHANGING YOUR PASSWORD.";
                 }
-                showModal(errorMessage);
+                showModal(errorMessage, "error");
             }
         }
         window.changePassword = changePassword; // Make globally accessible
@@ -536,7 +651,7 @@
          */
         async function addStudyScore() {
             if (!userId) {
-                showModal("PLEASE LOG IN OR SIGN UP TO ADD SCORES.");
+                showModal("PLEASE LOG IN OR SIGN UP TO ADD SCORES.", "warning");
                 return;
             }
             showLoading();
@@ -546,7 +661,7 @@
 
             if (!subject || isNaN(score) || score < 0 || score > 100 || !date) {
                 hideLoading();
-                showModal("PLEASE ENTER A VALID SUBJECT, SCORE (0-100), AND DATE.");
+                showModal("PLEASE ENTER A VALID SUBJECT, SCORE (0-100), AND DATE.", "warning");
                 return;
             }
 
@@ -568,7 +683,7 @@
             } catch (error) {
                 console.error(`Error adding study score to artifacts/${appId}/users/${userId}/studyScores:`, error);
                 hideLoading();
-                showModal("ERROR ADDING STUDY SCORE. PLEASE TRY AGAIN.");
+                showModal("ERROR ADDING STUDY SCORE. PLEASE TRY AGAIN.", "error");
             }
         }
         window.addStudyScore = addStudyScore; // Make globally accessible
@@ -589,7 +704,7 @@
             } catch (error) {
                 console.error(`Error deleting study score from artifacts/${appId}/users/${userId}/studyScores/${id}:`, error);
                 hideLoading();
-                showModal("ERROR DELETING STUDY SCORE. PLEASE TRY AGAIN.");
+                showModal("ERROR DELETING STUDY SCORE. PLEASE TRY AGAIN.", "error");
             }
         }
         window.deleteStudyScore = deleteStudyScore; // Make globally accessible
@@ -734,7 +849,7 @@
          */
         async function addAchievement() {
             if (!userId) {
-                showModal("ACCESS DENIED: PLEASE LOG IN.");
+                showModal("ACCESS DENIED: PLEASE LOG IN.", "warning");
                 return;
             }
             showLoading();
@@ -744,7 +859,7 @@
 
             if (!title || !date) {
                 hideLoading();
-                showModal("INPUT ERROR: TITLE AND DATE ARE REQUIRED.");
+                showModal("INPUT ERROR: TITLE AND DATE ARE REQUIRED.", "warning");
                 return;
             }
 
@@ -824,7 +939,7 @@
          */
         async function addDeadline() {
             if (!userId) {
-                showModal("ACCESS DENIED: PLEASE LOG IN.");
+                showModal("ACCESS DENIED: PLEASE LOG IN.", "warning");
                 return;
             }
             showLoading();
@@ -834,7 +949,7 @@
 
             if (!title || !date) {
                 hideLoading();
-                showModal("INPUT ERROR: TITLE AND DATE ARE REQUIRED.");
+                showModal("INPUT ERROR: TITLE AND DATE ARE REQUIRED.", "warning");
                 return;
             }
 
@@ -914,7 +1029,7 @@
          */
         async function addTodo() {
             if (!userId) {
-                showModal("ACCESS DENIED: PLEASE LOG IN.");
+                showModal("ACCESS DENIED: PLEASE LOG IN.", "warning");
                 return;
             }
             showLoading();
@@ -922,7 +1037,7 @@
 
             if (!task) {
                 hideLoading();
-                showModal("INPUT ERROR: TASK DESCRIPTION REQUIRED.");
+                showModal("INPUT ERROR: TASK DESCRIPTION REQUIRED.", "warning");
                 return;
             }
 
@@ -1085,12 +1200,12 @@
          */
         async function logTimerSession() {
             if (!userId) {
-                showModal("ACCESS DENIED: PLEASE LOG IN TO LOG SESSIONS.");
+                showModal("ACCESS DENIED: PLEASE LOG IN TO LOG SESSIONS.", "warning");
                 return;
             }
 
             if (timeLeft === 0) {
-                showModal("NO TIME TO LOG. START THE TIMER FIRST.");
+                showModal("NO TIME TO LOG. START THE TIMER FIRST.", "warning");
                 return;
             }
 
@@ -1115,7 +1230,7 @@
          */
         async function addManualLog(hours = null, minutes = null, subject = null, date = null) {
             if (!userId) {
-                showModal("ACCESS DENIED: PLEASE LOG IN.");
+                showModal("ACCESS DENIED: PLEASE LOG IN.", "warning");
                 return;
             }
             showLoading();
@@ -1127,14 +1242,14 @@
 
             if (isNaN(logHours) || isNaN(logMinutes) || logHours < 0 || logMinutes < 0 || logMinutes > 59 || !logSubject || !logDate) {
                 hideLoading();
-                showModal("INPUT ERROR: VALID TIME, SUBJECT, AND DATE ARE REQUIRED.");
+                showModal("INPUT ERROR: VALID TIME, SUBJECT, AND DATE ARE REQUIRED.", "warning");
                 return;
             }
 
             const totalMinutes = (logHours * 60) + logMinutes;
             if (totalMinutes === 0) {
                 hideLoading();
-                showModal("INPUT ERROR: LOGGED TIME MUST BE GREATER THAN ZERO.");
+                showModal("INPUT ERROR: LOGGED TIME MUST BE GREATER THAN ZERO.", "warning");
                 return;
             }
 
@@ -1530,7 +1645,7 @@
          */
         async function addEvent() {
             if (!userId) {
-                showModal("ACCESS DENIED: PLEASE LOG IN.");
+                showModal("ACCESS DENIED: PLEASE LOG IN.", "warning");
                 return;
             }
             showLoading();
@@ -1540,7 +1655,7 @@
 
             if (!title || !date) {
                 hideLoading();
-                showModal("INPUT ERROR: TITLE AND DATE ARE REQUIRED.");
+                showModal("INPUT ERROR: TITLE AND DATE ARE REQUIRED.", "warning");
                 return;
             }
 
@@ -1653,7 +1768,7 @@
                     linkInput.value = note.link;
                     saveButton.textContent = 'SAVE CHANGES';
                 } else {
-                    showModal("NOTE NOT FOUND.");
+                    showModal("NOTE NOT FOUND.", "warning");
                     return;
                 }
             } else {
@@ -1683,7 +1798,7 @@
          */
         async function addOrUpdateNote() {
             if (!userId) {
-                showModal("ACCESS DENIED: PLEASE LOG IN.");
+                showModal("ACCESS DENIED: PLEASE LOG IN.", "warning");
                 return;
             }
             showLoading();
@@ -1693,7 +1808,7 @@
 
             if (!title && !content && !link) {
                 hideLoading();
-                showModal("INPUT ERROR: TITLE, CONTENT, OR LINK IS REQUIRED.");
+                showModal("INPUT ERROR: TITLE, CONTENT, OR LINK IS REQUIRED.", "warning");
                 return;
             }
 
@@ -1861,7 +1976,7 @@
         function openViewNoteModal(noteId) {
             const note = notes.find(n => n.id === noteId);
             if (!note) {
-                showModal("NOTE NOT FOUND.");
+                showModal("NOTE NOT FOUND.", "warning");
                 return;
             }
 
@@ -1981,7 +2096,7 @@
                         body: message,
                         icon: 'https://placehold.co/100x100/8A2BE2/FFFFFF?text=DL' // Blue Violet icon
                     });
-                    showModal(`NOTIFICATION: ${message}`);
+                    showModal(`NOTIFICATION: ${message}`, "info");
                     console.log("NOTIFICATION TRANSMITTED:", message);
                 } else {
                     console.log("NO UPCOMING DEADLINES DETECTED.");
@@ -2033,17 +2148,26 @@
                         console.log(`Fetching user profile for existing session from: ${userProfilePath}`);
                         const userProfileSnap = await getDoc(userProfileRef);
 
-                        if (userProfileSnap.exists()) {
-                            loggedInUsername = userProfileSnap.data().username;
-                            hasDeadlinesLoadedInitial = false; // Reset flag for new session
-                            setupFirestoreListeners();
-                            showPage('dashboardPage');
-                            // scheduleDeadlineNotifications() is now called within the deadlines onSnapshot listener
+                        // If user email is verified, proceed to dashboard
+                        if (user.emailVerified) {
+                            if (userProfileSnap.exists()) {
+                                loggedInUsername = userProfileSnap.data().username;
+                                hasDeadlinesLoadedInitial = false; // Reset flag for new session
+                                setupFirestoreListeners();
+                                showPage('dashboardPage');
+                            } else {
+                                console.warn("AUTHENTICATED USER HAS NO PROFILE DOCUMENT. REDIRECTING TO WELCOME.");
+                                loggedInUsername = null;
+                                userId = null;
+                                showPage('welcomePage'); // Fallback if profile somehow missing
+                            }
                         } else {
-                            console.warn("AUTHENTICATED USER HAS NO PROFILE DOCUMENT. REDIRECTING TO WELCOME.");
-                            loggedInUsername = null;
-                            userId = null;
-                            showPage('welcomePage');
+                            // User is authenticated but email not verified
+                            // No need to fetch profile yet, just redirect to verify page
+                            loggedInUsername = null; // Don't show username on verify page if not fully set up
+                            userId = user.uid; // Keep userId for resending email on the verify page
+                            showPage('verifyEmailPage');
+                            showModal("YOUR EMAIL IS NOT VERIFIED. PLEASE CHECK YOUR INBOX FOR A VERIFICATION LINK.", "warning");
                         }
                     } else {
                         console.log("NO USER SIGNED IN. REDIRECTING TO WELCOME PAGE.");
@@ -2510,15 +2634,24 @@
         /* Custom modal message */
         .modal-message {
             position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
+            top: 0; /* Changed from 50% */
+            left: 0; /* Changed from 50% */
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.95);
+            display: flex; /* Always flex for centering */
+            justify-content: center;
+            align-items: center;
+            z-index: 1001;
+            backdrop-filter: blur(10px);
+            display: none; /* Controlled by JS */
+        }
+
+        .modal-message-content { /* New div for styling the modal box itself */
             background-color: #1A1A3A;
             padding: 35px 45px;
-            border: 2px solid #8A2BE2; /* Blue Violet */
+            border: 2px solid #8A2BE2; /* Default Blue Violet for info */
             box-shadow: 0 0 25px rgba(138, 43, 226, 0.7);
-            z-index: 1001;
-            animation: fadeIn 0.3s ease-out;
             max-width: 450px;
             width: 90%;
             text-align: center;
@@ -2526,14 +2659,17 @@
             text-transform: uppercase;
             letter-spacing: 1px;
             border-radius: 8px;
-            display: none; /* Controlled by JS */
-            font-family: 'Exo 2', sans-serif;
+            animation: fadeIn 0.3s ease-out;
+            font-family: 'Exo 2', sans-serif; /* Default font for modal content */
         }
 
-        .modal-message p {
+        .modal-message p#modalMessageText { /* Specific ID for message text */
             margin-bottom: 25px;
             font-size: 1.1em;
             color: #00FFFF; /* Electric Cyan */
+            /* Default font, will be overridden by JS for 'forgot password' */
+            font-family: 'Exo 2', sans-serif;
+            text-transform: uppercase;
         }
 
         .modal-message .modal-close-btn {
@@ -2972,16 +3108,6 @@
             font-family: 'Exo 2', sans-serif;
         }
 
-        /* Logo styling (removed .app-logo rule as the img tag is removed) */
-        /* .app-logo {
-            width: 220px;
-            height: auto;
-            margin-bottom: 40px;
-            border: none;
-            box-shadow: 0 0 30px rgba(0, 255, 255, 0.8);
-            border-radius: 0;
-        } */
-
         /* Note View Modal Styles */
         .view-note-modal, .note-form-modal {
             position: fixed;
@@ -3204,6 +3330,55 @@
             color: #00FF00;
         }
 
+        /* Forgot Password Link Styling */
+        .forgot-password-link {
+            display: block;
+            margin-top: 15px;
+            color: #00FFFF;
+            text-decoration: underline;
+            cursor: pointer;
+            font-size: 0.95em;
+            transition: color 0.2s ease-in-out;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+        .forgot-password-link:hover {
+            color: #8A2BE2;
+        }
+
+        /* New: Verify Email Page Styling */
+        .verify-email-content {
+            background-color: #1A1A3A;
+            padding: 40px;
+            border: 2px solid #FFA500; /* Orange border for warning */
+            box-shadow: 0 0 30px rgba(255, 165, 0, 0.7);
+            max-width: 600px;
+            width: 90%;
+            margin: 0 auto;
+            text-align: center;
+            color: #E0E0E0;
+            border-radius: 8px;
+            font-family: 'Exo 2', sans-serif;
+        }
+
+        .verify-email-content h2 {
+            color: #FFA500; /* Orange heading */
+            margin-bottom: 25px;
+        }
+
+        .verify-email-content p {
+            margin-bottom: 25px;
+            line-height: 1.7;
+            font-size: 1.1em;
+            color: #E0E0E0;
+            text-transform: uppercase;
+        }
+
+        .verify-email-content .btn {
+            margin-top: 20px;
+        }
+
+
         /* Responsive Adjustments */
         @media (max-width: 768px) {
             .dashboard {
@@ -3287,6 +3462,9 @@
             .note-card-title {
                 font-size: 1.3em;
             }
+            .verify-email-content {
+                padding: 30px;
+            }
         }
 
         @media (max-width: 500px) {
@@ -3360,6 +3538,9 @@
             }
             .note-card-title {
                 font-size: 1.2em;
+            }
+            .verify-email-content {
+                padding: 25px;
             }
         }
 
@@ -3446,7 +3627,19 @@
                 </div>
                 <button type="submit" class="btn">LOGIN</button>
             </form>
+            <span class="forgot-password-link" onclick="forgotPassword()">FORGOT PASSWORD?</span>
             <button class="btn back-btn" onclick="showPage('welcomePage')">BACK TO WELCOME</button>
+        </div>
+
+        <!-- New: Verify Email Page -->
+        <div class="page" id="verifyEmailPage">
+            <div class="verify-email-content">
+                <h2>EMAIL VERIFICATION REQUIRED</h2>
+                <p>AN EMAIL WITH A VERIFICATION LINK HAS BEEN SENT TO YOUR REGISTERED EMAIL ADDRESS. PLEASE CLICK THE LINK TO VERIFY YOUR ACCOUNT AND GAIN FULL ACCESS TO STUDY TRACKER PRO.</p>
+                <p>IF YOU DON'T SEE THE EMAIL, PLEASE CHECK YOUR SPAM FOLDER.</p>
+                <button class="btn" id="resendEmailBtn" onclick="resendVerificationEmail()">RESEND VERIFICATION EMAIL</button>
+                <button class="btn back-btn" onclick="showPage('loginPage')">BACK TO LOGIN</button>
+            </div>
         </div>
 
         <!-- Dashboard Page -->
@@ -3769,8 +3962,10 @@
 
     <!-- Custom Modal for Messages -->
     <div id="customModal" class="modal-message">
-        <p id="modalMessageText"></p>
-        <button class="modal-close-btn" onclick="hideModal()">OK</button>
+        <div class="modal-message-content">
+            <p id="modalMessageText"></p>
+            <button class="modal-close-btn" onclick="hideModal()">OK</button>
+        </div>
     </div>
 
     <!-- New: Note View Modal -->

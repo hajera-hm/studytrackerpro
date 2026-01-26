@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Study Tracker Pro</title>
+    <title>Focus Flow</title>
     <!-- Chart.js CDN for creating graphs -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <!-- Google Fonts for 'Exo 2' -->
@@ -75,7 +75,7 @@
             // Specific actions when navigating to certain pages
             if (pageId === 'dashboardPage') {
                 document.getElementById('dashboardWelcome').textContent = `WELCOME, ${loggedInUsername || 'USER'}!`;
-                document.querySelector('.app-name-display').textContent = '📚 STUDY TRACKER PRO';
+                document.querySelector('.app-name-display').textContent = '📚 Focus Flow';
                 document.getElementById('currentUserIdDisplay').textContent = `USER ID: ${userId || 'N/A'}`;
             } else if (pageId === 'profilePage') {
                 renderProfileDetails();
@@ -2092,7 +2092,7 @@
                         return;
                     }
 
-                    new Notification("STUDY TRACKER PRO: DEADLINE ALERT", {
+                    new Notification("Focus Flow: DEADLINE ALERT", {
                         body: message,
                         icon: 'https://placehold.co/100x100/8A2BE2/FFFFFF?text=DL' // Blue Violet icon
                     });
@@ -3562,7 +3562,7 @@
         <!-- Welcome Page -->
         <div class="page active" id="welcomePage">
             <!-- Logo image removed as per user request -->
-            <h1>STUDY TRACKER PRO</h1>
+            <h1>Focus Flow</h1>
             <p class="welcome-text">ACCESS YOUR LEARNING PLATFORM. TRACK PROGRESS, MANAGE DEADLINES, AND ACHIEVE OPTIMAL PERFORMANCE.</p>
             <button class="btn" onclick="showPage('signupPage')" id="signupBtn">SIGN UP</button>
             <button class="btn" onclick="showPage('loginPage')" id="loginBtn">LOG IN</button>
@@ -3635,7 +3635,7 @@
         <div class="page" id="verifyEmailPage">
             <div class="verify-email-content">
                 <h2>EMAIL VERIFICATION REQUIRED</h2>
-                <p>AN EMAIL WITH A VERIFICATION LINK HAS BEEN SENT TO YOUR REGISTERED EMAIL ADDRESS. PLEASE CLICK THE LINK TO VERIFY YOUR ACCOUNT AND GAIN FULL ACCESS TO STUDY TRACKER PRO.</p>
+                <p>AN EMAIL WITH A VERIFICATION LINK HAS BEEN SENT TO YOUR REGISTERED EMAIL ADDRESS. PLEASE CLICK THE LINK TO VERIFY YOUR ACCOUNT AND GAIN FULL ACCESS TO FOCUS FLOW.</p>
                 <p>IF YOU DON'T SEE THE EMAIL, PLEASE CHECK YOUR SPAM FOLDER.</p>
                 <button class="btn" id="resendEmailBtn" onclick="resendVerificationEmail()">RESEND VERIFICATION EMAIL</button>
                 <button class="btn back-btn" onclick="showPage('loginPage')">BACK TO LOGIN</button>
@@ -3645,7 +3645,7 @@
         <!-- Dashboard Page -->
         <div class="page" id="dashboardPage">
             <h2 id="dashboardWelcome">WELCOME, USER!</h2>
-            <p class="app-name-display">📚 STUDY TRACKER PRO</p>
+            <p class="app-name-display">📚 Focus Flow</p>
             <p id="currentUserIdDisplay" class="user-info">USER ID: <span style="font-family: 'Exo 2', sans-serif;">${userId || 'N/A'}</span></p>
             <div class="dashboard">
                 <div class="dashboard-item" onclick="showPage('profilePage')">

@@ -4014,5 +4014,59 @@
     </div>
 
     <div id="eventTooltip" class="event-tooltip"></div>
+<div id="ai-chat-widget" style="position: fixed; bottom: 20px; right: 20px; z-index: 9999; font-family: sans-serif;">
+    <button onclick="toggleAI()" style="background: #4285f4; color: white; border: none; padding: 12px 20px; border-radius: 50px; cursor: pointer; box-shadow: 0 4px 10px rgba(0,0,0,0.3); font-weight: bold;">✨ Ask Study AI</button>
+    
+    <div id="ai-window" style="display: none; width: 300px; background: white; border: 1px solid #ddd; border-radius: 10px; margin-bottom: 10px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); flex-direction: column;">
+        <div style="background: #4285f4; color: white; padding: 10px; border-radius: 10px 10px 0 0; display: flex; justify-content: space-between;">
+            <span>Study Coach</span>
+            <button onclick="toggleAI()" style="background:none; border:none; color:white; cursor:pointer;">✕</button>
+        </div>
+        <div id="ai-messages" style="height: 250px; overflow-y: auto; padding: 10px; font-size: 14px; line-height: 1.4;">
+            Hi! I'm your AI study coach. Ask me anything!
+        </div>
+        <div style="padding: 10px; border-top: 1px solid #eee; display: flex;">
+            <input type="text" id="ai-input" placeholder="Type a question..." style="flex: 1; border: 1px solid #ddd; border-radius: 5px; padding: 8px; outline: none;">
+            <button onclick="sendQuestion()" style="margin-left: 5px; background: #4285f4; color: white; border: none; border-radius: 5px; padding: 0 10px; cursor: pointer;">Send</button>
+        </div>
+    </div>
+</div>
+
+<script>
+function toggleAI() {
+    const window = document.getElementById('ai-window');
+    window.style.display = window.style.display === 'none' ? 'flex' : 'none';
+}
+
+async function sendQuestion() {
+    const input = document.getElementById('ai-input');
+    const msgDiv = document.getElementById('ai-messages');
+    const question = input.value.trim();
+    
+    // ⚠️ REPLACE THIS WITH YOUR KEY
+    const API_KEY = "AIzaSyBL-0mU2QXOe47MFJjrM1b4jmN4gX72tU0"; 
+
+    if (!question) return;
+
+    msgDiv.innerHTML += `<div style="margin-bottom:10px; color: #4285f4;"><b>You:</b> ${question}</div>`;
+    input.value = '';
+    msgDiv.scrollTop = msgDiv.scrollHeight;
+
+    try {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${API_KEY}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ contents: [{ parts: [{ text: question }] }] })
+        });
+        const data = await response.json();
+        const answer = data.candidates[0].content.parts[0].text;
+        
+        msgDiv.innerHTML += `<div style="margin-bottom:10px;"><b>AI:</b> ${answer}</div>`;
+        msgDiv.scrollTop = msgDiv.scrollHeight;
+    } catch (error) {
+        msgDiv.innerHTML += `<div style="color: red; margin-top:5px;">Error: Check your console (F12) for details.</div>`;
+    }
+}
+</script>
 </body>
 </html>

@@ -12,7 +12,7 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         // Added sendEmailVerification to imports
-        import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, sendEmailVerification } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, sendEmailVerification, updatePassword } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, collection, query, orderBy, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // --- Global Firebase Variables ---
@@ -615,7 +615,7 @@
                 const user = auth.currentUser;
                 if (user) {
                     // Firebase Auth handles password updates directly on the user object
-                    await user.updatePassword(newPassword);
+                    await updatePassword(user, newPassword);
 
                     // Clear password fields
                     document.getElementById('oldPassword').value = ''; // This field is no longer functionally used for auth, but kept for UI consistency
